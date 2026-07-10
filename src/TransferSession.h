@@ -88,6 +88,7 @@ private:
     bool SendStringPacket(SOCKET sock, uint8_t type, const std::wstring& str);
     std::wstring RecvStringPacket(SOCKET sock, uint8_t expectedType);
 
+    void NotifyDone(TransferOutcome outcome, const std::wstring& message);
     void Log(const std::wstring& msg);
     void ReportProgress();
 };

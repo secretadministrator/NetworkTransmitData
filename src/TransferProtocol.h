@@ -16,6 +16,7 @@ enum class PacketType : uint8_t {
     PROGRESS = 0x0A,
     FILE_HASH = 0x0B,
     FILE_DONE_ACK = 0x0C,
+    DONE_ACK = 0x0D,
     ERROR_MSG = 0xFF,
     DONE = 0x00
 };
