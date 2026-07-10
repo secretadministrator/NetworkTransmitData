@@ -13,6 +13,7 @@
 #define IDC_BTN_AUTO_IP         109
 #define IDC_BTN_SET_IP          110
 #define IDC_BTN_RESTORE_IP      111
+#define IDC_BTN_RECONNECT       112
 #define IDC_COMBO_NIC           403
 
 #define IDC_EDIT_PEER_IP        204

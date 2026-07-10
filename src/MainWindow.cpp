@@ -410,20 +410,24 @@ LRESULT MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (comp) {
                 std::wstring msg = comp->message;
                 if (msg.empty()) {
-                    switch (comp->outcome) {
-                        case TransferOutcome::Success:   msg = L"\u4f20\u8f93\u5df2\u5b8c\u6210"; break;
-                        case TransferOutcome::Failed:    msg = L"\u4f20\u8f93\u5931\u8d25"; break;
-                        case TransferOutcome::Cancelled: msg = L"\u4f20\u8f93\u5df2\u53d6\u6d88"; break;
+                    switch (comp->code) {
+                        case TransferResultCode::Success:        msg = L"\u4f20\u8f93\u5df2\u5b8c\u6210"; break;
+                        case TransferResultCode::Cancelled:      msg = L"\u4f20\u8f93\u5df2\u53d6\u6d88"; break;
+                        case TransferResultCode::ConnectionLost: msg = L"\u8fde\u63a5\u5df2\u4e2d\u65ad\uff0c\u53ef\u4ee5\u91cd\u65b0\u8fde\u63a5\u7eed\u4f20"; break;
+                        case TransferResultCode::FileError:     msg = L"\u4f20\u8f93\u5931\u8d25"; break;
+                        default:                                msg = L"\u4f20\u8f93\u5931\u8d25"; break;
                     }
                 }
                 LogMessage(msg);
                 delete comp;
             }
-            SendMessageW(m_hProgressBar, PBM_SETPOS, 0, 0);
-            SendMessageW(m_hProgressBar, PBM_SETRANGE32, 0, 100);
-            SetWindowTextW(m_hProgressText, L"");
-            ShowWindow(m_hProgressBar, SW_HIDE);
-            ShowWindow(m_hProgressText, SW_HIDE);
+            if (!comp || comp->code != TransferResultCode::ConnectionLost) {
+                SendMessageW(m_hProgressBar, PBM_SETPOS, 0, 0);
+                SendMessageW(m_hProgressBar, PBM_SETRANGE32, 0, 100);
+                SetWindowTextW(m_hProgressText, L"");
+                ShowWindow(m_hProgressBar, SW_HIDE);
+                ShowWindow(m_hProgressText, SW_HIDE);
+            }
             return 0;
         }
     }

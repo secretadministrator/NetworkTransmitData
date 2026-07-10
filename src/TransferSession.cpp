@@ -11,6 +11,7 @@
 #include "AppConfig.h"
 #include <bcrypt.h>
 #include <ws2tcpip.h>
+#include <mstcpip.h>
 #include <vector>
 #include <filesystem>
 #include <cstring>
@@ -33,11 +34,13 @@ void TransferSession::ReportProgress() {
     if (m_progressCb) m_progressCb(m_stats);
 }
 
-void TransferSession::NotifyDone(TransferOutcome outcome, const std::wstring& message) {
+void TransferSession::NotifyDone(TransferResultCode code, const std::wstring& message) {
     if (!m_doneCb) return;
     TransferResult result;
-    result.outcome = outcome;
+    result.code = code;
     result.message = message;
+    result.socketError = m_lastSocketError.load();
+    result.resumable = m_stats.resumable;
     result.stats = m_stats;
     m_doneCb(result);
 }
@@ -88,23 +91,298 @@ void TransferSession::Stop() {
         m_workerThread.join();
 }
 
-static TransferResult MakeResult(TransferOutcome outcome, const std::wstring& msg) {
+static TransferResult MakeResult(TransferResultCode code, const std::wstring& msg) {
     TransferResult r;
-    r.outcome = outcome;
+    r.code = code;
     r.message = msg;
     return r;
 }
 
-static bool SendAll(SOCKET sock, const uint8_t* data, size_t len) {
-    while (len > 0) {
-        int toSend = (len > INT_MAX) ? INT_MAX : (int)len;
-        int sent = send(sock, (const char*)data, toSend, 0);
-        if (sent <= 0) return false;
-        data += sent;
-        len -= (size_t)sent;
-    }
-    return true;
+// ── Temporary / hard socket error helpers ──
+
+bool TransferSession::IsTemporarySocketError(int error)
+{
+    return error == WSAETIMEDOUT ||
+           error == WSAEWOULDBLOCK ||
+           error == WSAEINTR;
 }
+
+bool TransferSession::IsHardConnectionError(int error)
+{
+    switch (error) {
+    case WSAECONNRESET:
+    case WSAECONNABORTED:
+    case WSAENETDOWN:
+    case WSAENETRESET:
+    case WSAENETUNREACH:
+    case WSAEHOSTUNREACH:
+    case WSAENOTCONN:
+    case WSAESHUTDOWN:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// ── Retryable send (with send mutex, partial-send safe) ──
+
+IoResult TransferSession::SendAllLocked(
+    SOCKET sock,
+    const uint8_t* data,
+    size_t length)
+{
+    size_t sentTotal = 0;
+    int timeoutCount = 0;
+    ULONGLONG lastProgress = GetTickCount64();
+
+    while (sentTotal < length) {
+        if (!m_running) {
+            return {IoStatus::Cancelled, 0};
+        }
+
+        size_t remaining = length - sentTotal;
+        int requestLength =
+            remaining > static_cast<size_t>(INT_MAX)
+            ? INT_MAX
+            : static_cast<int>(remaining);
+
+        int sent = send(
+            sock,
+            reinterpret_cast<const char*>(data + sentTotal),
+            requestLength,
+            0);
+
+        if (sent > 0) {
+            sentTotal += static_cast<size_t>(sent);
+
+            ULONGLONG now = GetTickCount64();
+            lastProgress = now;
+            m_lastSendProgressTick.store(now);
+            timeoutCount = 0;
+            continue;
+        }
+
+        if (sent == 0) {
+            IoResult r{IoStatus::PeerClosed, 0};
+            MarkConnectionLost(sock, r, L"\u53d1\u9001\u65f6\u5bf9\u7aef\u5173\u95ed\u8fde\u63a5");
+            return r;
+        }
+
+        int error = WSAGetLastError();
+
+        if (!m_running) {
+            return {IoStatus::Cancelled, error};
+        }
+
+        if (IsTemporarySocketError(error)) {
+            ++timeoutCount;
+
+            ULONGLONG now = GetTickCount64();
+
+            if (now - lastProgress >= CONNECTION_IDLE_MS ||
+                timeoutCount >= MAX_TIMEOUT_RETRIES) {
+                IoResult r{IoStatus::IdleTimeout, error};
+                MarkConnectionLost(sock, r, L"\u53d1\u9001\u8d85\u65f6");
+                return r;
+            }
+
+            continue;
+        }
+
+        if (IsHardConnectionError(error)) {
+            IoResult r{IoStatus::SocketError, error};
+            MarkConnectionLost(sock, r, L"\u53d1\u9001\u786c\u9519\u8bef");
+            return r;
+        }
+
+        return {IoStatus::SocketError, error};
+    }
+
+    return {IoStatus::Ok, 0};
+}
+
+IoResult TransferSession::RecvExact(
+    SOCKET sock,
+    uint8_t* data,
+    size_t length)
+{
+    size_t receivedTotal = 0;
+    int timeoutCount = 0;
+    ULONGLONG lastProgress = GetTickCount64();
+
+    while (receivedTotal < length) {
+        if (!m_running) {
+            return {IoStatus::Cancelled, 0};
+        }
+
+        size_t remaining = length - receivedTotal;
+        int requestLength =
+            remaining > static_cast<size_t>(INT_MAX)
+            ? INT_MAX
+            : static_cast<int>(remaining);
+
+        int received = recv(
+            sock,
+            reinterpret_cast<char*>(data + receivedTotal),
+            requestLength,
+            0);
+
+        if (received > 0) {
+            receivedTotal += static_cast<size_t>(received);
+
+            ULONGLONG now = GetTickCount64();
+            lastProgress = now;
+            m_lastRecvProgressTick.store(now);
+            timeoutCount = 0;
+            continue;
+        }
+
+        if (received == 0) {
+            IoResult r{IoStatus::PeerClosed, 0};
+            MarkConnectionLost(sock, r, L"\u63a5\u6536\u65f6\u5bf9\u7aef\u5173\u95ed\u8fde\u63a5");
+            return r;
+        }
+
+        int error = WSAGetLastError();
+
+        if (!m_running) {
+            return {IoStatus::Cancelled, error};
+        }
+
+        if (IsTemporarySocketError(error)) {
+            ++timeoutCount;
+
+            ULONGLONG now = GetTickCount64();
+
+            if (now - lastProgress >= CONNECTION_IDLE_MS ||
+                timeoutCount >= MAX_TIMEOUT_RETRIES) {
+                IoResult r{IoStatus::IdleTimeout, error};
+                MarkConnectionLost(sock, r, L"\u63a5\u6536\u8d85\u65f6");
+                return r;
+            }
+
+            continue;
+        }
+
+        if (IsHardConnectionError(error)) {
+            IoResult r{IoStatus::SocketError, error};
+            MarkConnectionLost(sock, r, L"\u63a5\u6536\u786c\u9519\u8bef");
+            return r;
+        }
+
+        return {IoStatus::SocketError, error};
+    }
+
+    return {IoStatus::Ok, 0};
+}
+
+// ── Packet send with mutex ──
+
+IoResult TransferSession::SendPacketResult(
+    SOCKET sock,
+    uint8_t type,
+    const uint8_t* payload,
+    size_t payloadSize)
+{
+    if (payloadSize > MAX_PAYLOAD_BYTES) {
+        return {IoStatus::ProtocolError, 0};
+    }
+
+    std::lock_guard<std::mutex> lock(m_sendMutex);
+
+    uint32_t length = static_cast<uint32_t>(payloadSize);
+
+    uint8_t header[5] = {};
+    header[0] = type;
+    header[1] = static_cast<uint8_t>(length & 0xFF);
+    header[2] = static_cast<uint8_t>((length >> 8) & 0xFF);
+    header[3] = static_cast<uint8_t>((length >> 16) & 0xFF);
+    header[4] = static_cast<uint8_t>((length >> 24) & 0xFF);
+
+    IoResult result = SendAllLocked(sock, header, sizeof(header));
+    if (!result.IsOk()) {
+        return result;
+    }
+
+    if (payloadSize > 0) {
+        result = SendAllLocked(sock, payload, payloadSize);
+    }
+
+    return result;
+}
+
+// ── Raw packet receive (no heartbeat filtering) ──
+
+IoResult TransferSession::RecvRawPacket(
+    SOCKET sock,
+    uint8_t& type,
+    std::vector<uint8_t>& payload)
+{
+    uint8_t header[5] = {};
+
+    IoResult result = RecvExact(sock, header, sizeof(header));
+    if (!result.IsOk()) {
+        return result;
+    }
+
+    type = header[0];
+
+    uint32_t length =
+        static_cast<uint32_t>(header[1]) |
+        (static_cast<uint32_t>(header[2]) << 8) |
+        (static_cast<uint32_t>(header[3]) << 16) |
+        (static_cast<uint32_t>(header[4]) << 24);
+
+    if (length > MAX_PAYLOAD_BYTES) {
+        return {IoStatus::ProtocolError, 0};
+    }
+
+    payload.resize(length);
+
+    if (length > 0) {
+        result = RecvExact(sock, payload.data(), length);
+    }
+
+    return result;
+}
+
+// ── Business packet receive (auto-filters heartbeats) ──
+
+IoResult TransferSession::RecvPacketResult(
+    SOCKET sock,
+    uint8_t& type,
+    std::vector<uint8_t>& payload)
+{
+    for (;;) {
+        IoResult result = RecvRawPacket(sock, type, payload);
+
+        if (!result.IsOk()) {
+            return result;
+        }
+
+        if (type == static_cast<uint8_t>(PacketType::HEARTBEAT)) {
+            IoResult ackResult = SendPacketResult(
+                sock,
+                static_cast<uint8_t>(PacketType::HEARTBEAT_ACK),
+                payload.empty() ? nullptr : payload.data(),
+                payload.size());
+
+            if (!ackResult.IsOk()) {
+                return ackResult;
+            }
+
+            continue;
+        }
+
+        if (type == static_cast<uint8_t>(PacketType::HEARTBEAT_ACK)) {
+            continue;
+        }
+
+        return {IoStatus::Ok, 0};
+    }
+}
+
+// ── Legacy boolean send wrappers ──
 
 bool TransferSession::SendPacket(SOCKET sock, uint8_t type, const std::vector<uint8_t>& payload) {
     const uint8_t* data = payload.empty() ? nullptr : payload.data();
@@ -112,45 +390,14 @@ bool TransferSession::SendPacket(SOCKET sock, uint8_t type, const std::vector<ui
 }
 
 bool TransferSession::SendPacket(SOCKET sock, uint8_t type, const uint8_t* payload, size_t payloadSize) {
-    if (payloadSize > MAX_PAYLOAD_BYTES) return false;
-
-    uint32_t len = (uint32_t)payloadSize;
-    uint8_t header[5] = {};
-    header[0] = type;
-    header[1] = (uint8_t)(len & 0xFF);
-    header[2] = (uint8_t)((len >> 8) & 0xFF);
-    header[3] = (uint8_t)((len >> 16) & 0xFF);
-    header[4] = (uint8_t)((len >> 24) & 0xFF);
-
-    if (!SendAll(sock, header, sizeof(header))) return false;
-    if (len > 0) {
-        if (!SendAll(sock, payload, payloadSize)) return false;
-    }
-    return true;
+    return SendPacketResult(sock, type, payload, payloadSize).IsOk();
 }
 
+// ── Legacy boolean recv wrapper ──
+
 bool TransferSession::RecvPacket(SOCKET sock, uint8_t& type, std::vector<uint8_t>& payload) {
-    uint8_t header[5] = {};
-    int received = 0;
-    while (received < 5) {
-        int r = recv(sock, (char*)header + received, 5 - received, 0);
-        if (r <= 0) return false;
-        received += r;
-    }
-    type = header[0];
-    uint32_t len = (uint32_t)header[1] | ((uint32_t)header[2] << 8)
-        | ((uint32_t)header[3] << 16) | ((uint32_t)header[4] << 24);
-
-    if (len > MAX_PAYLOAD_BYTES) return false;
-
-    payload.resize(len);
-    received = 0;
-    while (received < (int)len) {
-        int r = recv(sock, (char*)payload.data() + received, len - received, 0);
-        if (r <= 0) return false;
-        received += r;
-    }
-    return true;
+    IoResult result = RecvPacketResult(sock, type, payload);
+    return result.IsOk();
 }
 
 bool TransferSession::SendStringPacket(SOCKET sock, uint8_t type, const std::wstring& str) {
@@ -176,6 +423,130 @@ static void SetSocketTimeouts(SOCKET sock, DWORD timeoutMs) {
 static void EnableLowLatencyTcp(SOCKET sock) {
     BOOL noDelay = TRUE;
     setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char*)&noDelay, sizeof(noDelay));
+}
+
+static bool EnableTcpKeepAlive(SOCKET sock)
+{
+    tcp_keepalive settings = {};
+    settings.onoff = 1;
+    settings.keepalivetime = 30000;
+    settings.keepaliveinterval = 5000;
+
+    DWORD bytesReturned = 0;
+
+    return WSAIoctl(
+        sock,
+        SIO_KEEPALIVE_VALS,
+        &settings,
+        sizeof(settings),
+        nullptr,
+        0,
+        &bytesReturned,
+        nullptr,
+        nullptr) != SOCKET_ERROR;
+}
+
+// ── Heartbeat ──
+
+void TransferSession::StartHeartbeat(SOCKET sock)
+{
+    StopHeartbeat();
+
+    ULONGLONG now = GetTickCount64();
+
+    m_lastSendProgressTick.store(now);
+    m_lastRecvProgressTick.store(now);
+    m_connectionLost.store(false);
+    m_heartbeatRunning.store(true);
+
+    m_heartbeatThread = std::thread([this, sock]() {
+        while (m_heartbeatRunning &&
+               m_running &&
+               !m_connectionLost) {
+
+            for (int i = 0; i < 10; ++i) {
+                if (!m_heartbeatRunning ||
+                    !m_running ||
+                    m_connectionLost) {
+                    return;
+                }
+
+                Sleep(500);
+            }
+
+            ULONGLONG nowTick = GetTickCount64();
+            ULONGLONG lastSend =
+                m_lastSendProgressTick.load();
+
+            if (nowTick - lastSend < HEARTBEAT_INTERVAL_MS) {
+                continue;
+            }
+
+            uint64_t sequence =
+                ++m_heartbeatSequence;
+
+            uint8_t payload[sizeof(sequence)] = {};
+            memcpy(payload, &sequence, sizeof(sequence));
+
+            IoResult result = SendPacketResult(
+                sock,
+                static_cast<uint8_t>(PacketType::HEARTBEAT),
+                payload,
+                sizeof(payload));
+
+            if (!result.IsOk()) {
+                MarkConnectionLost(
+                    sock,
+                    result,
+                    L"\u53d1\u9001\u5fc3\u8df3\u5305");
+
+                return;
+            }
+        }
+    });
+}
+
+void TransferSession::StopHeartbeat()
+{
+    m_heartbeatRunning.store(false);
+
+    if (m_heartbeatThread.joinable() &&
+        m_heartbeatThread.get_id() != std::this_thread::get_id()) {
+        m_heartbeatThread.join();
+    }
+}
+
+void TransferSession::MarkConnectionLost(
+    SOCKET sock,
+    const IoResult& result,
+    const std::wstring& operation)
+{
+    if (!m_running) {
+        return;
+    }
+
+    bool alreadyLost = m_connectionLost.exchange(true);
+    if (alreadyLost) {
+        return;
+    }
+
+    m_lastSocketError.store(result.wsaError);
+
+    std::wstring message =
+        L"\u8fde\u63a5\u5df2\u4e2d\u65ad\uff1a" + operation;
+
+    if (result.status == IoStatus::IdleTimeout) {
+        message += L"\uff0c\u8fde\u7eed 90 \u79d2\u6ca1\u6709\u7f51\u7edc\u54cd\u5e94";
+    } else if (result.status == IoStatus::PeerClosed) {
+        message += L"\uff0c\u5bf9\u7aef\u5df2\u5173\u95ed\u8fde\u63a5";
+    } else if (result.wsaError != 0) {
+        message += L"\uff0cWinsock \u9519\u8bef\u7801 "
+                 + std::to_wstring(result.wsaError);
+    }
+
+    Log(message);
+
+    shutdown(sock, SD_BOTH);
 }
 
 struct Sha256Context {
@@ -273,18 +644,23 @@ static void RecalculatePlanTotals(TransferPlanner::Plan& plan) {
 void TransferSession::SenderWorker(const std::wstring& sourceDir, const std::wstring& peerIP,
     int port, const std::wstring& pairingCode)
 {
+    StopHeartbeat();
+
     TransferResult result;
     try {
         result = InnerSenderWorker(sourceDir, peerIP, port, pairingCode);
     } catch (const std::exception& e) {
-        result.outcome = TransferOutcome::Failed;
+        result.code = TransferResultCode::InternalError;
         result.message = L"\u53d1\u9001\u7ebf\u7a0b\u5f02\u5e38";
         result.stats = m_stats;
     } catch (...) {
-        result.outcome = TransferOutcome::Failed;
+        result.code = TransferResultCode::InternalError;
         result.message = L"\u53d1\u9001\u7ebf\u7a0b\u53d1\u751f\u672a\u77e5\u5f02\u5e38";
         result.stats = m_stats;
     }
+
+    StopHeartbeat();
+
     std::lock_guard<std::mutex> lock(m_sockMutex);
     if (m_sock != INVALID_SOCKET) {
         if (m_running) shutdown(m_sock, SD_BOTH);
@@ -310,7 +686,7 @@ TransferResult TransferSession::InnerSenderWorker(const std::wstring& sourceDir,
     SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (sock == INVALID_SOCKET) {
         Log(L"\u521b\u5efa socket \u5931\u8d25");
-        WSACleanup(); return MakeResult(TransferOutcome::Failed, L"\u521b\u5efa Socket \u5931\u8d25");
+        WSACleanup(); return MakeResult(TransferResultCode::FileError, L"\u521b\u5efa Socket \u5931\u8d25");
     }
     m_sock = sock;
     EnableLowLatencyTcp(sock);
@@ -323,14 +699,14 @@ TransferResult TransferSession::InnerSenderWorker(const std::wstring& sourceDir,
     if (InetPtonA(AF_INET, ipA.c_str(), &addr.sin_addr) != 1) {
         Log(L"\u5bf9\u65b9 IP \u5730\u5740\u65e0\u6548: " + peerIP);
         closesocket(sock); m_sock = INVALID_SOCKET;
-        WSACleanup(); return MakeResult(TransferOutcome::Failed, L"\u5bf9\u65b9 IP \u5730\u5740\u65e0\u6548");
+        WSACleanup(); return MakeResult(TransferResultCode::FileError, L"\u5bf9\u65b9 IP \u5730\u5740\u65e0\u6548");
     }
 
     if (connect(sock, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
         std::wstring errMsg = L"\u8fde\u63a5\u63a5\u6536\u7aef\u5931\u8d25\uff0c\u9519\u8bef\u7801: " + std::to_wstring(WSAGetLastError());
         Log(errMsg);
         closesocket(sock); m_sock = INVALID_SOCKET;
-        WSACleanup(); return MakeResult(TransferOutcome::Failed, errMsg);
+        WSACleanup(); return MakeResult(TransferResultCode::FileError, errMsg);
     }
 
     Log(L"\u5df2\u8fde\u63a5\uff0c\u6b63\u5728\u9a8c\u8bc1\u914d\u5bf9\u7801...");
@@ -338,16 +714,20 @@ TransferResult TransferSession::InnerSenderWorker(const std::wstring& sourceDir,
     if (!SendStringPacket(sock, (uint8_t)PacketType::PAIRING_REQUEST, pairingCode)) {
         Log(L"\u53d1\u9001\u914d\u5bf9\u7801\u5931\u8d25");
         closesocket(sock); m_sock = INVALID_SOCKET;
-        WSACleanup(); return MakeResult(TransferOutcome::Failed, L"\u53d1\u9001\u914d\u5bf9\u7801\u5931\u8d25");
+        WSACleanup(); return MakeResult(TransferResultCode::ProtocolError, L"\u53d1\u9001\u914d\u5bf9\u7801\u5931\u8d25");
     }
 
     std::wstring resp = RecvStringPacket(sock, (uint8_t)PacketType::PAIRING_RESPONSE);
     if (resp != L"OK") {
         Log(L"\u914d\u5bf9\u7801\u9a8c\u8bc1\u5931\u8d25");
         closesocket(sock); m_sock = INVALID_SOCKET;
-        WSACleanup(); return MakeResult(TransferOutcome::Failed, L"\u914d\u5bf9\u7801\u9a8c\u8bc1\u5931\u8d25");
+        WSACleanup(); return MakeResult(TransferResultCode::ProtocolError, L"\u914d\u5bf9\u7801\u9a8c\u8bc1\u5931\u8d25");
     }
-    SetSocketTimeouts(sock, 0);
+
+    SetSocketTimeouts(sock, IO_WAIT_TIMEOUT_MS);
+
+    EnableTcpKeepAlive(sock);
+    StartHeartbeat(sock);
 
     Log(L"\u914d\u5bf9\u7801\u9a8c\u8bc1\u6210\u529f\uff01");
     Log(L"\u6b63\u5728\u626b\u63cf\u6587\u4ef6...");
@@ -363,7 +743,7 @@ TransferResult TransferSession::InnerSenderWorker(const std::wstring& sourceDir,
 
     if (!m_running) {
         closesocket(sock); m_sock = INVALID_SOCKET;
-        WSACleanup(); return MakeResult(TransferOutcome::Cancelled, L"\u4f20\u8f93\u5df2\u53d6\u6d88");
+        WSACleanup(); return MakeResult(TransferResultCode::Cancelled, L"\u4f20\u8f93\u5df2\u53d6\u6d88");
     }
 
     Manifest manifest(files);
@@ -375,7 +755,7 @@ TransferResult TransferSession::InnerSenderWorker(const std::wstring& sourceDir,
     if (!SendPacket(sock, (uint8_t)PacketType::MANIFEST, manifestPayload)) {
         Log(L"\u53d1\u9001\u6587\u4ef6\u6e05\u5355\u5931\u8d25");
         closesocket(sock); m_sock = INVALID_SOCKET;
-        WSACleanup(); return MakeResult(TransferOutcome::Failed, L"\u53d1\u9001\u6587\u4ef6\u6e05\u5355\u5931\u8d25");
+        WSACleanup(); return MakeResult(TransferResultCode::FileError, L"\u53d1\u9001\u6587\u4ef6\u6e05\u5355\u5931\u8d25");
     }
 
     Log(L"\u5df2\u53d1\u9001\u6587\u4ef6\u6e05\u5355\uff0c\u7b49\u5f85\u63a5\u6536\u7aef\u8ba1\u5212...");
@@ -384,7 +764,7 @@ TransferResult TransferSession::InnerSenderWorker(const std::wstring& sourceDir,
     if (planStr.empty()) {
         Log(L"\u63a5\u6536\u4f20\u8f93\u8ba1\u5212\u5931\u8d25");
         closesocket(sock); m_sock = INVALID_SOCKET;
-        WSACleanup(); return MakeResult(TransferOutcome::Failed, L"\u63a5\u6536\u4f20\u8f93\u8ba1\u5212\u5931\u8d25");
+        WSACleanup(); return MakeResult(TransferResultCode::FileError, L"\u63a5\u6536\u4f20\u8f93\u8ba1\u5212\u5931\u8d25");
     }
 
     std::string planUtf8 = utils::ToUtf8(planStr);
@@ -415,12 +795,12 @@ TransferResult TransferSession::InnerSenderWorker(const std::wstring& sourceDir,
     progress.Reset(plan.totalBytes);
     int completed = 0;
     TransferResult result;
-    result.outcome = TransferOutcome::Success;
+    result.code = TransferResultCode::Success;
     result.message = L"\u4f20\u8f93\u5df2\u5b8c\u6210";
 
     for (const auto& entry : plan.entries) {
         if (!m_running) {
-            result = MakeResult(TransferOutcome::Cancelled, L"\u4f20\u8f93\u5df2\u53d6\u6d88");
+            result = MakeResult(TransferResultCode::Cancelled, L"\u4f20\u8f93\u5df2\u53d6\u6d88");
             break;
         }
 
@@ -534,14 +914,20 @@ TransferResult TransferSession::InnerSenderWorker(const std::wstring& sourceDir,
 
         if (!m_running) {
             CloseSha256(hashCtx);
-            result = MakeResult(TransferOutcome::Cancelled, L"\u4f20\u8f93\u5df2\u53d6\u6d88");
+            result = MakeResult(TransferResultCode::Cancelled, L"\u4f20\u8f93\u5df2\u53d6\u6d88");
             break;
         }
 
         if (chunkSendFailed) {
             CloseSha256(hashCtx);
-            m_stats.failedFiles++;
-            result = MakeResult(TransferOutcome::Failed, L"\u53d1\u9001\u6570\u636e\u5931\u8d25");
+            if (m_connectionLost) {
+                result = MakeResult(TransferResultCode::ConnectionLost, L"\u53d1\u9001\u6570\u636e\u65f6\u8fde\u63a5\u4e2d\u65ad");
+                m_stats.interruptedFiles++;
+                m_stats.resumable = true;
+            } else {
+                m_stats.failedFiles++;
+                result = MakeResult(TransferResultCode::FileError, L"\u53d1\u9001\u6570\u636e\u5931\u8d25");
+            }
             break;
         }
 
@@ -567,16 +953,28 @@ TransferResult TransferSession::InnerSenderWorker(const std::wstring& sourceDir,
             std::vector<uint8_t> hashPayload(sha256Hex.begin(), sha256Hex.end());
             if (!SendPacket(sock, (uint8_t)PacketType::FILE_HASH, hashPayload)) {
                 Log(L"\u53d1\u9001\u6587\u4ef6\u6821\u9a8c\u503c\u5931\u8d25: " + entry.relativePath);
-                m_stats.failedFiles++;
-                result = MakeResult(TransferOutcome::Failed, L"\u53d1\u9001\u6587\u4ef6\u6821\u9a8c\u503c\u5931\u8d25");
+                if (m_connectionLost) {
+                    result = MakeResult(TransferResultCode::ConnectionLost, L"\u53d1\u9001\u6821\u9a8c\u503c\u65f6\u8fde\u63a5\u4e2d\u65ad");
+                    m_stats.interruptedFiles++;
+                    m_stats.resumable = true;
+                } else {
+                    m_stats.failedFiles++;
+                    result = MakeResult(TransferResultCode::FileError, L"\u53d1\u9001\u6587\u4ef6\u6821\u9a8c\u503c\u5931\u8d25");
+                }
                 break;
             }
         }
 
         if (!SendStringPacket(sock, (uint8_t)PacketType::FILE_DONE, entry.relativePath)) {
             Log(L"\u53d1\u9001\u6587\u4ef6\u5b8c\u6210\u4fe1\u53f7\u5931\u8d25");
-            m_stats.failedFiles++;
-            result = MakeResult(TransferOutcome::Failed, L"\u53d1\u9001\u6587\u4ef6\u5b8c\u6210\u4fe1\u53f7\u5931\u8d25");
+            if (m_connectionLost) {
+                result = MakeResult(TransferResultCode::ConnectionLost, L"\u53d1\u9001 FILE_DONE \u65f6\u8fde\u63a5\u4e2d\u65ad");
+                m_stats.interruptedFiles++;
+                m_stats.resumable = true;
+            } else {
+                m_stats.failedFiles++;
+                result = MakeResult(TransferResultCode::FileError, L"\u53d1\u9001\u6587\u4ef6\u5b8c\u6210\u4fe1\u53f7\u5931\u8d25");
+            }
             break;
         }
 
@@ -584,8 +982,14 @@ TransferResult TransferSession::InnerSenderWorker(const std::wstring& sourceDir,
         std::vector<uint8_t> ackPayload;
         if (!RecvPacket(sock, ackType, ackPayload) || ackType != (uint8_t)PacketType::FILE_DONE_ACK) {
             Log(L"\u63a5\u6536\u7aef\u9a8c\u8bc1\u54cd\u5e94\u5931\u8d25: " + entry.relativePath);
-            m_stats.failedFiles++;
-            result = MakeResult(TransferOutcome::Failed, L"\u63a5\u6536\u7aef\u9a8c\u8bc1\u54cd\u5e94\u5931\u8d25");
+            if (m_connectionLost) {
+                result = MakeResult(TransferResultCode::ConnectionLost, L"\u63a5\u6536 FILE_DONE_ACK \u65f6\u8fde\u63a5\u4e2d\u65ad");
+                m_stats.interruptedFiles++;
+                m_stats.resumable = true;
+            } else {
+                m_stats.failedFiles++;
+                result = MakeResult(TransferResultCode::FileError, L"\u63a5\u6536\u7aef\u9a8c\u8bc1\u54cd\u5e94\u5931\u8d25");
+            }
             break;
         }
         std::wstring ack = utils::FromUtf8(std::string((const char*)ackPayload.data(), ackPayload.size()));
@@ -597,7 +1001,7 @@ TransferResult TransferSession::InnerSenderWorker(const std::wstring& sourceDir,
                 + L" (" + (ack.empty() ? L"\u65e0\u54cd\u5e94" : ack) + L")");
             m_stats.failedFiles++;
             SendStringPacket(sock, (uint8_t)PacketType::ERROR_MSG, L"TRANSFER_ABORTED");
-            result = MakeResult(TransferOutcome::Failed, L"\u63a5\u6536\u7aef\u9a8c\u8bc1\u5931\u8d25");
+            result = MakeResult(TransferResultCode::FileError, L"\u63a5\u6536\u7aef\u9a8c\u8bc1\u5931\u8d25");
             break;
         } else {
             completed++;
@@ -607,27 +1011,32 @@ TransferResult TransferSession::InnerSenderWorker(const std::wstring& sourceDir,
         ReportProgress();
     }
 
-    if (!m_running && result.outcome == TransferOutcome::Success) {
-        result = MakeResult(TransferOutcome::Cancelled, L"\u4f20\u8f93\u5df2\u53d6\u6d88");
+    if (!m_running && result.code == TransferResultCode::Success) {
+        result = MakeResult(TransferResultCode::Cancelled, L"\u4f20\u8f93\u5df2\u53d6\u6d88");
     }
 
-    if (result.outcome == TransferOutcome::Cancelled) {
+    if (result.code == TransferResultCode::ConnectionLost) {
+        result.message = L"\u8fde\u63a5\u5df2\u4e2d\u65ad\uff0c\u53ef\u4ee5\u91cd\u65b0\u8fde\u63a5\u7eed\u4f20";
+        result.socketError = m_lastSocketError.load();
+        result.resumable = true;
+        Log(result.message);
+    } else if (result.code == TransferResultCode::Cancelled) {
         Log(L"\u4f20\u8f93\u672a\u5b8c\u6574\u5b8c\u6210\uff0c\u5df2\u505c\u6b62\u4f1a\u8bdd");
         SendStringPacket(sock, (uint8_t)PacketType::ERROR_MSG, L"TRANSFER_ABORTED");
-    } else if (result.outcome == TransferOutcome::Failed || m_stats.failedFiles > 0) {
-        result.outcome = TransferOutcome::Failed;
+    } else if (result.code == TransferResultCode::FileError || m_stats.failedFiles > 0) {
+        result.code = TransferResultCode::FileError;
         result.message = L"\u90e8\u5206\u6587\u4ef6\u4f20\u8f93\u5931\u8d25";
         Log(L"\u4f20\u8f93\u672a\u5b8c\u6574\u5b8c\u6210\uff0c\u5df2\u505c\u6b62\u4f1a\u8bdd");
         SendStringPacket(sock, (uint8_t)PacketType::ERROR_MSG, L"TRANSFER_ABORTED");
     } else {
         if (!SendStringPacket(sock, (uint8_t)PacketType::DONE, L"")) {
-            result = MakeResult(TransferOutcome::Failed, L"\u53d1\u9001\u4f20\u8f93\u5b8c\u6210\u4fe1\u53f7\u5931\u8d25");
+            result = MakeResult(TransferResultCode::FileError, L"\u53d1\u9001\u4f20\u8f93\u5b8c\u6210\u4fe1\u53f7\u5931\u8d25");
         } else {
             std::wstring doneAck = RecvStringPacket(sock, (uint8_t)PacketType::DONE_ACK);
             if (doneAck != L"OK") {
-                result = MakeResult(TransferOutcome::Failed, L"\u672a\u6536\u5230\u63a5\u6536\u7aef\u7684\u4f20\u8f93\u5b8c\u6210\u786e\u8ba4");
+                result = MakeResult(TransferResultCode::FileError, L"\u672a\u6536\u5230\u63a5\u6536\u7aef\u7684\u4f20\u8f93\u5b8c\u6210\u786e\u8ba4");
             } else {
-                result = MakeResult(TransferOutcome::Success, L"\u4f20\u8f93\u5df2\u5b8c\u6210");
+                result = MakeResult(TransferResultCode::Success, L"\u4f20\u8f93\u5df2\u5b8c\u6210");
             }
         }
     }
@@ -637,6 +1046,7 @@ TransferResult TransferSession::InnerSenderWorker(const std::wstring& sourceDir,
     std::wstring report = ReportGenerator::GenerateReport(m_stats, sourceDir, L"");
     ReportGenerator::SaveReport(report, utils::GetExecutableDir() + L"\\reports");
 
+    StopHeartbeat();
     shutdown(sock, SD_BOTH);
     closesocket(sock);
     m_sock = INVALID_SOCKET;
@@ -650,31 +1060,15 @@ TransferResult TransferSession::InnerSenderWorker(const std::wstring& sourceDir,
 void TransferSession::ReceiverWorker(const std::wstring& targetDir, int port,
     const std::wstring& expectedPairingCode, TransferMode mode)
 {
-    TransferResult result;
+    StopHeartbeat();
+
     try {
         InnerReceiverWorker(targetDir, port, expectedPairingCode, mode);
     } catch (const std::exception& e) {
-        result.outcome = TransferOutcome::Failed;
-        result.message = L"\u63a5\u6536\u7ebf\u7a0b\u5f02\u5e38";
-        result.stats = m_stats;
-        if (m_doneCb) m_doneCb(result);
+        NotifyDone(TransferResultCode::InternalError, L"\u63a5\u6536\u7ebf\u7a0b\u5f02\u5e38");
     } catch (...) {
-        result.outcome = TransferOutcome::Failed;
-        result.message = L"\u63a5\u6536\u7ebf\u7a0b\u53d1\u751f\u672a\u77e5\u5f02\u5e38";
-        result.stats = m_stats;
-        if (m_doneCb) m_doneCb(result);
+        NotifyDone(TransferResultCode::InternalError, L"\u63a5\u6536\u7ebf\u7a0b\u53d1\u751f\u672a\u77e5\u5f02\u5e38");
     }
-    std::lock_guard<std::mutex> lock(m_sockMutex);
-    if (m_sock != INVALID_SOCKET) {
-        if (m_running) shutdown(m_sock, SD_BOTH);
-        closesocket(m_sock);
-        m_sock = INVALID_SOCKET;
-    }
-    if (m_listenSock != INVALID_SOCKET) {
-        closesocket(m_listenSock);
-        m_listenSock = INVALID_SOCKET;
-    }
-    m_running = false;
 }
 
 void TransferSession::InnerReceiverWorker(const std::wstring& targetDir, int port,
@@ -688,7 +1082,7 @@ void TransferSession::InnerReceiverWorker(const std::wstring& targetDir, int por
     SOCKET listenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (listenSock == INVALID_SOCKET) {
         Log(L"\u521b\u5efa socket \u5931\u8d25");
-        NotifyDone(TransferOutcome::Failed, L"\u521b\u5efa\u76d1\u542c Socket \u5931\u8d25");
+        NotifyDone(TransferResultCode::FileError, L"\u521b\u5efa\u76d1\u542c Socket \u5931\u8d25");
         WSACleanup(); return;
     }
     {
@@ -713,7 +1107,7 @@ void TransferSession::InnerReceiverWorker(const std::wstring& targetDir, int por
                 m_listenSock = INVALID_SOCKET;
         }
         closesocket(listenSock);
-        NotifyDone(TransferOutcome::Failed, msg);
+        NotifyDone(TransferResultCode::FileError, msg);
         WSACleanup(); return;
     }
 
@@ -726,7 +1120,7 @@ void TransferSession::InnerReceiverWorker(const std::wstring& targetDir, int por
                 m_listenSock = INVALID_SOCKET;
         }
         closesocket(listenSock);
-        NotifyDone(TransferOutcome::Failed, msg);
+        NotifyDone(TransferResultCode::FileError, msg);
         WSACleanup(); return;
     }
 
@@ -750,7 +1144,12 @@ void TransferSession::InnerReceiverWorker(const std::wstring& targetDir, int por
         EnableLowLatencyTcp(sock);
         SetSocketTimeouts(sock, HANDSHAKE_TIMEOUT_MS);
 
-        TransferResult result = HandleReceiverConnection(sock, targetDir, expectedPairingCode, mode);
+        StopHeartbeat();
+
+        ReceiverConnectionResult connResult =
+            HandleReceiverConnection(sock, targetDir, expectedPairingCode, mode);
+
+        StopHeartbeat();
 
         bool closeSock = false;
         {
@@ -765,10 +1164,32 @@ void TransferSession::InnerReceiverWorker(const std::wstring& targetDir, int por
             closesocket(sock);
         }
 
-        if (m_doneCb) m_doneCb(result);
+        if (!m_running) break;
 
-        if (m_running)
-            Log(L"\u63a5\u6536\u7aef\u4fdd\u6301\u76d1\u542c\uff0c\u7b49\u5f85\u4e0b\u4e00\u6b21\u8fde\u63a5...");
+        switch (connResult) {
+        case ReceiverConnectionResult::Completed:
+            NotifyDone(TransferResultCode::Success,
+                L"\u63a5\u6536\u5df2\u5b8c\u6210\uff0c\u6b63\u5728\u7b49\u5f85\u4e0b\u6b21\u8fde\u63a5...");
+            break;
+
+        case ReceiverConnectionResult::ConnectionLost:
+            NotifyDone(TransferResultCode::ConnectionLost,
+                L"\u8fde\u63a5\u5df2\u4e2d\u65ad\uff0c\u672a\u5b8c\u6210\u6587\u4ef6\u5df2\u4fdd\u7559\uff0c"
+                L"\u6b63\u5728\u7b49\u5f85\u53d1\u9001\u7aef\u91cd\u65b0\u8fde\u63a5\u7eed\u4f20...");
+            break;
+
+        case ReceiverConnectionResult::PairingRejected:
+            Log(L"\u914d\u5bf9\u7801\u9519\u8bef\uff0c\u7b49\u5f85\u4e0b\u4e00\u6b21\u8fde\u63a5...");
+            break;
+
+        case ReceiverConnectionResult::Cancelled:
+            NotifyDone(TransferResultCode::Cancelled, L"\u63a5\u6536\u5df2\u53d6\u6d88");
+            return;
+
+        case ReceiverConnectionResult::Failed:
+            NotifyDone(TransferResultCode::FileError, L"\u63a5\u6536\u5931\u8d25");
+            break;
+        }
     }
 
     bool closeListen = false;
@@ -820,7 +1241,7 @@ static MirrorDeleteResult ApplyMirrorDeletes(const std::vector<std::wstring>& fi
     return result;
 }
 
-TransferResult TransferSession::HandleReceiverConnection(SOCKET sock, const std::wstring& targetDir,
+ReceiverConnectionResult TransferSession::HandleReceiverConnection(SOCKET sock, const std::wstring& targetDir,
     const std::wstring& expectedPairingCode, TransferMode mode)
 {
     Log(L"\u5df2\u8fde\u63a5\uff0c\u7b49\u5f85\u914d\u5bf9\u7801...");
@@ -828,18 +1249,20 @@ TransferResult TransferSession::HandleReceiverConnection(SOCKET sock, const std:
     std::wstring code = RecvStringPacket(sock, (uint8_t)PacketType::PAIRING_REQUEST);
     if (code.empty()) {
         Log(L"\u63a5\u6536\u914d\u5bf9\u7801\u5931\u8d25");
-        return MakeResult(TransferOutcome::Failed, L"\u63a5\u6536\u914d\u5bf9\u7801\u5931\u8d25");
+        return ReceiverConnectionResult::Failed;
     }
 
     if (code != expectedPairingCode) {
         Log(L"\u914d\u5bf9\u7801\u9519\u8bef\uff01\u671f\u671b: " + expectedPairingCode
             + L"\uff0c\u6536\u5230: " + code);
         SendStringPacket(sock, (uint8_t)PacketType::PAIRING_RESPONSE, L"FAIL");
-        return MakeResult(TransferOutcome::Failed, L"\u914d\u5bf9\u7801\u9519\u8bef");
+        return ReceiverConnectionResult::PairingRejected;
     }
 
     SendStringPacket(sock, (uint8_t)PacketType::PAIRING_RESPONSE, L"OK");
-    SetSocketTimeouts(sock, 0);
+    SetSocketTimeouts(sock, IO_WAIT_TIMEOUT_MS);
+    EnableTcpKeepAlive(sock);
+    StartHeartbeat(sock);
     Log(L"\u914d\u5bf9\u7801\u9a8c\u8bc1\u6210\u529f\uff01");
     m_stats = TransferStats{};
 
@@ -847,14 +1270,15 @@ TransferResult TransferSession::HandleReceiverConnection(SOCKET sock, const std:
     std::vector<uint8_t> manifestPayload;
     if (!RecvPacket(sock, manifestType, manifestPayload) || manifestType != (uint8_t)PacketType::MANIFEST) {
         Log(L"\u63a5\u6536\u6587\u4ef6\u6e05\u5355\u5931\u8d25");
-        return MakeResult(TransferOutcome::Failed, L"\u63a5\u6536\u6587\u4ef6\u6e05\u5355\u5931\u8d25");
+        if (m_connectionLost) return ReceiverConnectionResult::ConnectionLost;
+        return ReceiverConnectionResult::Failed;
     }
 
     std::string manifestJson((char*)manifestPayload.data(), manifestPayload.size());
     Manifest manifest;
     if (!manifest.FromJSON(manifestJson)) {
         Log(L"\u89e3\u6790\u6587\u4ef6\u6e05\u5355\u5931\u8d25");
-        return MakeResult(TransferOutcome::Failed, L"\u89e3\u6790\u6587\u4ef6\u6e05\u5355\u5931\u8d25");
+        return ReceiverConnectionResult::Failed;
     }
 
     Log(L"\u5df2\u63a5\u6536\u6587\u4ef6\u6e05\u5355: " + std::to_wstring(manifest.GetEntries().size())
@@ -874,7 +1298,8 @@ TransferResult TransferSession::HandleReceiverConnection(SOCKET sock, const std:
     std::vector<uint8_t> planPayload(planJson.begin(), planJson.end());
     if (!SendPacket(sock, (uint8_t)PacketType::TRANSFER_PLAN, planPayload)) {
         Log(L"\u53d1\u9001\u4f20\u8f93\u8ba1\u5212\u5931\u8d25");
-        return MakeResult(TransferOutcome::Failed, L"\u53d1\u9001\u4f20\u8f93\u8ba1\u5212\u5931\u8d25");
+        if (m_connectionLost) return ReceiverConnectionResult::ConnectionLost;
+        return ReceiverConnectionResult::Failed;
     }
 
     m_stats.totalBytes = plan.totalBytes;
@@ -1168,9 +1593,13 @@ TransferResult TransferSession::HandleReceiverConnection(SOCKET sock, const std:
         if (failureMessage.empty()) {
             failureMessage = L"\u4f20\u8f93\u4f1a\u8bdd\u672a\u6b63\u5e38\u5b8c\u6210";
         }
-        return MakeResult(
-            m_running ? TransferOutcome::Failed : TransferOutcome::Cancelled,
-            failureMessage);
+        if (m_connectionLost) {
+            Log(L"\u8fde\u63a5\u5df2\u4e2d\u65ad\uff0c\u4fdd\u7559 .dtpart \u6587\u4ef6");
+            m_stats.interruptedFiles++;
+            m_stats.resumable = true;
+            return ReceiverConnectionResult::ConnectionLost;
+        }
+        return m_running ? ReceiverConnectionResult::Failed : ReceiverConnectionResult::Cancelled;
     }
 
     if (mode == TransferMode::MIRROR && !extraFiles.empty()) {
@@ -1196,7 +1625,7 @@ TransferResult TransferSession::HandleReceiverConnection(SOCKET sock, const std:
             SendStringPacket(sock, (uint8_t)PacketType::DONE_ACK,
                 L"FAIL\n" + message);
 
-            return MakeResult(TransferOutcome::Failed, message);
+            return ReceiverConnectionResult::Failed;
         }
 
         Log(L"\u955c\u50cf\u5220\u9664\u5b8c\u6210: "
@@ -1204,13 +1633,8 @@ TransferResult TransferSession::HandleReceiverConnection(SOCKET sock, const std:
     }
 
     if (!SendStringPacket(sock, (uint8_t)PacketType::DONE_ACK, L"OK")) {
-        return MakeResult(TransferOutcome::Failed,
-            L"\u955c\u50cf\u63d0\u4ea4\u6210\u529f\uff0c\u4f46\u53d1\u9001\u6700\u7ec8\u786e\u8ba4\u5931\u8d25");
+        return ReceiverConnectionResult::Failed;
     }
 
-    return MakeResult(
-        TransferOutcome::Success,
-        mode == TransferMode::MIRROR
-            ? L"\u955c\u50cf\u540c\u6b65\u5df2\u5b8c\u6210"
-            : L"\u6587\u4ef6\u4f20\u8f93\u5df2\u5b8c\u6210");
+    return ReceiverConnectionResult::Completed;
 }

@@ -17,6 +17,10 @@ enum class PacketType : uint8_t {
     FILE_HASH = 0x0B,
     FILE_DONE_ACK = 0x0C,
     DONE_ACK = 0x0D,
+
+    HEARTBEAT = 0x0E,
+    HEARTBEAT_ACK = 0x0F,
+
     ERROR_MSG = 0xFF,
     DONE = 0x00
 };
