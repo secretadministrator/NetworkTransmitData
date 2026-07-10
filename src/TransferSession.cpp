@@ -784,6 +784,42 @@ void TransferSession::InnerReceiverWorker(const std::wstring& targetDir, int por
     WSACleanup();
 }
 
+struct MirrorDeleteResult {
+    int attempted = 0;
+    int deleted = 0;
+    std::vector<std::wstring> failedFiles;
+    std::vector<DWORD> errorCodes;
+
+    bool Success() const {
+        return failedFiles.empty();
+    }
+};
+
+static MirrorDeleteResult ApplyMirrorDeletes(const std::vector<std::wstring>& files) {
+    MirrorDeleteResult result;
+
+    for (const auto& file : files) {
+        ++result.attempted;
+
+        if (DeleteFileW(file.c_str())) {
+            ++result.deleted;
+            continue;
+        }
+
+        DWORD error = GetLastError();
+
+        if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) {
+            ++result.deleted;
+            continue;
+        }
+
+        result.failedFiles.push_back(file);
+        result.errorCodes.push_back(error);
+    }
+
+    return result;
+}
+
 TransferResult TransferSession::HandleReceiverConnection(SOCKET sock, const std::wstring& targetDir,
     const std::wstring& expectedPairingCode, TransferMode mode)
 {
@@ -869,15 +905,11 @@ TransferResult TransferSession::HandleReceiverConnection(SOCKET sock, const std:
             if (receiverFailed || m_stats.failedFiles > 0) {
                 failureMessage = L"\u6536\u5230\u5b8c\u6210\u4fe1\u53f7\uff0c\u4f46\u5f53\u524d\u4f1a\u8bdd\u5b58\u5728\u5931\u8d25\u6587\u4ef6";
                 receiverFailed = true;
-                break;
-            }
-            if (!SendStringPacket(sock, (uint8_t)PacketType::DONE_ACK, L"OK")) {
-                failureMessage = L"\u53d1\u9001\u4f20\u8f93\u5b8c\u6210\u786e\u8ba4\u5931\u8d25";
-                receiverFailed = true;
+                SendStringPacket(sock, (uint8_t)PacketType::DONE_ACK, L"FAIL\n\u6587\u4ef6\u4f20\u8f93\u6216\u6821\u9a8c\u5b58\u5728\u5931\u8d25");
                 break;
             }
             receivedDone = true;
-            Log(L"\u6240\u6709\u6587\u4ef6\u63a5\u6536\u5b8c\u6210");
+            Log(L"\u6240\u6709\u6587\u4ef6\u63a5\u6536\u5e76\u6821\u9a8c\u5b8c\u6210\uff0c\u51c6\u5907\u63d0\u4ea4\u955c\u50cf\u64cd\u4f5c");
             break;
         }
 
@@ -1132,36 +1164,53 @@ TransferResult TransferSession::HandleReceiverConnection(SOCKET sock, const std:
 
     Log(L"\u63a5\u6536\u7ed3\u675f");
 
-    if (mode == TransferMode::MIRROR && receivedDone && !extraFiles.empty()) {
-        int deleted = 0;
-        for (const auto& f : extraFiles) {
-            if (DeleteFileW(f.c_str())) {
-                deleted++;
-            }
+    if (!receivedDone || receiverFailed || m_stats.failedFiles > 0) {
+        if (failureMessage.empty()) {
+            failureMessage = L"\u4f20\u8f93\u4f1a\u8bdd\u672a\u6b63\u5e38\u5b8c\u6210";
         }
-        if (deleted > 0)
-            Log(L"\u955c\u50cf\u5220\u9664\u5b8c\u6210: " + std::to_wstring(deleted) + L" \u4e2a\u6587\u4ef6");
+        return MakeResult(
+            m_running ? TransferOutcome::Failed : TransferOutcome::Cancelled,
+            failureMessage);
     }
 
-    TransferResult result;
-    result.stats = m_stats;
+    if (mode == TransferMode::MIRROR && !extraFiles.empty()) {
+        Log(L"\u5f00\u59cb\u63d0\u4ea4\u955c\u50cf\u5220\u9664\uff0c\u5171 "
+            + std::to_wstring(extraFiles.size()) + L" \u4e2a\u6587\u4ef6");
 
-    if (!m_running) {
-        result.outcome = TransferOutcome::Cancelled;
-        result.message = L"\u4f20\u8f93\u5df2\u53d6\u6d88";
-    } else if (receiverFailed || !receivedDone) {
-        result.outcome = TransferOutcome::Failed;
-        result.message = failureMessage.empty() ? L"\u4f20\u8f93\u672a\u6b63\u5e38\u5b8c\u6210" : failureMessage;
-    } else if (m_stats.failedFiles > 0) {
-        result.outcome = TransferOutcome::Failed;
-        result.message = L"\u90e8\u5206\u6587\u4ef6\u4f20\u8f93\u5931\u8d25";
-    } else {
-        result.outcome = TransferOutcome::Success;
-        result.message = L"\u4f20\u8f93\u5df2\u5b8c\u6210";
+        MirrorDeleteResult deleteResult = ApplyMirrorDeletes(extraFiles);
+
+        if (!deleteResult.Success()) {
+            std::wstring message =
+                L"\u955c\u50cf\u5220\u9664\u672a\u5b8c\u6574\u5b8c\u6210\uff1a\u6210\u529f "
+                + std::to_wstring(deleteResult.deleted)
+                + L" \u4e2a\uff0c\u5931\u8d25 "
+                + std::to_wstring(deleteResult.failedFiles.size())
+                + L" \u4e2a";
+            Log(message);
+
+            for (size_t i = 0; i < deleteResult.failedFiles.size(); ++i) {
+                Log(L"\u5220\u9664\u5931\u8d25: " + deleteResult.failedFiles[i]
+                    + L"\uff0c\u9519\u8bef\u7801: " + std::to_wstring(deleteResult.errorCodes[i]));
+            }
+
+            SendStringPacket(sock, (uint8_t)PacketType::DONE_ACK,
+                L"FAIL\n" + message);
+
+            return MakeResult(TransferOutcome::Failed, message);
+        }
+
+        Log(L"\u955c\u50cf\u5220\u9664\u5b8c\u6210: "
+            + std::to_wstring(deleteResult.deleted) + L" \u4e2a\u6587\u4ef6");
     }
 
-    std::wstring report = ReportGenerator::GenerateReport(m_stats, L"", targetDir);
-    ReportGenerator::SaveReport(report, utils::GetExecutableDir() + L"\\reports");
+    if (!SendStringPacket(sock, (uint8_t)PacketType::DONE_ACK, L"OK")) {
+        return MakeResult(TransferOutcome::Failed,
+            L"\u955c\u50cf\u63d0\u4ea4\u6210\u529f\uff0c\u4f46\u53d1\u9001\u6700\u7ec8\u786e\u8ba4\u5931\u8d25");
+    }
 
-    return result;
+    return MakeResult(
+        TransferOutcome::Success,
+        mode == TransferMode::MIRROR
+            ? L"\u955c\u50cf\u540c\u6b65\u5df2\u5b8c\u6210"
+            : L"\u6587\u4ef6\u4f20\u8f93\u5df2\u5b8c\u6210");
 }
