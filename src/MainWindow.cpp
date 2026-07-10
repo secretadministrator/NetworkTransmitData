@@ -408,11 +408,13 @@ LRESULT MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_TRANSFER_DONE: {
             TransferResult* comp = (TransferResult*)wp;
             if (comp) {
-                std::wstring msg;
-                switch (comp->outcome) {
-                    case TransferOutcome::Success:   msg = L"\u4f20\u8f93\u5df2\u5b8c\u6210"; break;
-                    case TransferOutcome::Failed:    msg = L"\u4f20\u8f93\u5931\u8d25"; break;
-                    case TransferOutcome::Cancelled: msg = L"\u4f20\u8f93\u5df2\u53d6\u6d88"; break;
+                std::wstring msg = comp->message;
+                if (msg.empty()) {
+                    switch (comp->outcome) {
+                        case TransferOutcome::Success:   msg = L"\u4f20\u8f93\u5df2\u5b8c\u6210"; break;
+                        case TransferOutcome::Failed:    msg = L"\u4f20\u8f93\u5931\u8d25"; break;
+                        case TransferOutcome::Cancelled: msg = L"\u4f20\u8f93\u5df2\u53d6\u6d88"; break;
+                    }
                 }
                 LogMessage(msg);
                 delete comp;

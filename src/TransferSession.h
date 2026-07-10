@@ -73,13 +73,13 @@ private:
 
     void SenderWorker(const std::wstring& sourceDir, const std::wstring& peerIP,
         int port, const std::wstring& pairingCode);
-    void InnerSenderWorker(const std::wstring& sourceDir, const std::wstring& peerIP,
+    TransferResult InnerSenderWorker(const std::wstring& sourceDir, const std::wstring& peerIP,
         int port, const std::wstring& pairingCode);
     void ReceiverWorker(const std::wstring& targetDir, int port,
         const std::wstring& expectedPairingCode, TransferMode mode);
     void InnerReceiverWorker(const std::wstring& targetDir, int port,
         const std::wstring& expectedPairingCode, TransferMode mode);
-    bool HandleReceiverConnection(SOCKET sock, const std::wstring& targetDir,
+    TransferResult HandleReceiverConnection(SOCKET sock, const std::wstring& targetDir,
         const std::wstring& expectedPairingCode, TransferMode mode);
 
     bool SendPacket(SOCKET sock, uint8_t type, const std::vector<uint8_t>& payload);
