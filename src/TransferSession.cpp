@@ -575,10 +575,20 @@ void TransferSession::InnerSenderWorker(const std::wstring& sourceDir, const std
         ReportProgress();
     }
 
-    if (m_running && m_stats.failedFiles == 0) {
+    TransferCompletion comp;
+    comp.stats = m_stats;
+    if (!m_running) {
+        comp.result = TransferResult::Cancelled;
+    } else if (m_stats.failedFiles == 0) {
+        comp.result = TransferResult::Success;
         Log(L"\u6240\u6709\u6587\u4ef6\u53d1\u9001\u5b8c\u6210");
         SendStringPacket(sock, (uint8_t)PacketType::DONE, L"");
+    } else if (m_stats.completedFiles > 0) {
+        comp.result = TransferResult::PartialSuccess;
+        Log(L"\u4f20\u8f93\u672a\u5b8c\u6574\u5b8c\u6210\uff0c\u5df2\u505c\u6b62\u4f1a\u8bdd");
+        SendStringPacket(sock, (uint8_t)PacketType::ERROR_MSG, L"TRANSFER_ABORTED");
     } else {
+        comp.result = TransferResult::Failed;
         Log(L"\u4f20\u8f93\u672a\u5b8c\u6574\u5b8c\u6210\uff0c\u5df2\u505c\u6b62\u4f1a\u8bdd");
         SendStringPacket(sock, (uint8_t)PacketType::ERROR_MSG, L"TRANSFER_ABORTED");
     }
@@ -587,7 +597,7 @@ void TransferSession::InnerSenderWorker(const std::wstring& sourceDir, const std
     std::wstring report = ReportGenerator::GenerateReport(m_stats, sourceDir, L"");
     ReportGenerator::SaveReport(report, utils::GetExecutableDir() + L"\\reports");
 
-    if (m_doneCb) m_doneCb();
+    if (m_doneCb) m_doneCb(comp);
 
     shutdown(sock, SD_BOTH);
     closesocket(sock);
@@ -703,8 +713,19 @@ void TransferSession::InnerReceiverWorker(const std::wstring& targetDir, int por
             closesocket(sock);
         }
 
-        if (sessionEnded && m_doneCb)
-            m_doneCb();
+        if (sessionEnded && m_doneCb) {
+            TransferCompletion comp;
+            comp.stats = m_stats;
+            if (!m_running)
+                comp.result = TransferResult::Cancelled;
+            else if (m_stats.failedFiles == 0)
+                comp.result = TransferResult::Success;
+            else if (m_stats.completedFiles > 0)
+                comp.result = TransferResult::PartialSuccess;
+            else
+                comp.result = TransferResult::Failed;
+            m_doneCb(comp);
+        }
 
         if (m_running)
             Log(L"\u63a5\u6536\u7aef\u4fdd\u6301\u76d1\u542c\uff0c\u7b49\u5f85\u4e0b\u4e00\u6b21\u8fde\u63a5...");

@@ -24,6 +24,20 @@ struct TransferStats {
     std::wstring currentFile;
 };
 
+enum class TransferResult {
+    Success,
+    PartialSuccess,
+    Failed,
+    Cancelled,
+    ConnectionLost
+};
+
+struct TransferCompletion {
+    TransferResult result;
+    TransferStats stats;
+    std::wstring errorMessage;
+};
+
 class TransferSession {
 public:
     TransferSession();
@@ -42,7 +56,7 @@ public:
     using LogCallback = std::function<void(const std::wstring&)>;
     void SetLogCallback(LogCallback cb) { m_logCb = cb; }
 
-    using DoneCallback = std::function<void()>;
+    using DoneCallback = std::function<void(const TransferCompletion&)>;
     void SetDoneCallback(DoneCallback cb) { m_doneCb = cb; }
 
     const TransferStats& GetStats() const { return m_stats; }

@@ -271,8 +271,11 @@ void SenderPage::OnStartTransfer() {
             PostMessageW(mw->GetHWND(), WM_TRANSFER_PROGRESS, (WPARAM)copy, 0);
         }
     });
-    m_session.SetDoneCallback([mw]() {
-        if (mw) PostMessageW(mw->GetHWND(), WM_TRANSFER_DONE, 0, 0);
+    m_session.SetDoneCallback([mw](const TransferCompletion& comp) {
+        if (mw) {
+            TransferCompletion* copy = new TransferCompletion(comp);
+            PostMessageW(mw->GetHWND(), WM_TRANSFER_DONE, (WPARAM)copy, 0);
+        }
     });
     if (!m_session.StartAsSender(m_sourceDir, m_peerIP, port, m_pairingCode)) {
         MessageBoxW(m_hMainWnd, L"\u542f\u52a8\u4f20\u8f93\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5",

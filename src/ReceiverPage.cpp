@@ -261,8 +261,11 @@ void ReceiverPage::OnStartListening() {
             PostMessageW(mw->GetHWND(), WM_TRANSFER_PROGRESS, (WPARAM)copy, 0);
         }
     });
-    m_session.SetDoneCallback([mw]() {
-        if (mw) PostMessageW(mw->GetHWND(), WM_TRANSFER_DONE, 0, 0);
+    m_session.SetDoneCallback([mw](const TransferCompletion& comp) {
+        if (mw) {
+            TransferCompletion* copy = new TransferCompletion(comp);
+            PostMessageW(mw->GetHWND(), WM_TRANSFER_DONE, (WPARAM)copy, 0);
+        }
     });
     if (!m_session.StartAsReceiver(m_targetDir, port, m_pairingCode, mode)) {
         SetDlgItemTextW(m_hParent, IDC_DISCOVERY_STATUS, L"\u542f\u52a8\u63a5\u6536\u5931\u8d25");

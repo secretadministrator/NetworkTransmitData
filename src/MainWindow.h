@@ -7,6 +7,8 @@
 
 #include "IPage.h"
 
+struct TransferCompletion;
+
 enum class AppPage {
     ROLE_SELECT,
     SENDER_SETUP,
