@@ -1,6 +1,7 @@
 # Generated artifacts
 backup/
 logs/
+build/
 *.lock
 *.log
 
@@ -8,3 +9,7 @@ logs/
 Thumbs.db
 Desktop.ini
 $RECYCLE.BIN/
+
+# Build outputs
+*.exe
+*.exe.manifest
