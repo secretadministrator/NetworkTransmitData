@@ -1,0 +1,10 @@
+# Generated artifacts
+backup/
+logs/
+*.lock
+*.log
+
+# Windows
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
