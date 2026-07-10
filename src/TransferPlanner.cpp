@@ -51,27 +51,13 @@ TransferPlanner::Plan TransferPlanner::BuildPlan(const Manifest& manifest, const
             addTransfer();
         } else {
             auto existingSize = fs::file_size(targetPath, ec);
-            if (!ec && existingSize == entry.size) {
-                if (!entry.sha256.empty()) {
-                    if (utils::ComputeSHA256(targetPath) == entry.sha256) {
-                        pe.action = FileAction::SKIP;
-                        plan.skipFiles++;
-                    } else {
-                        pe.action = FileAction::TRANSFER;
-                        addTransfer();
-                    }
-                } else {
-                    // No pre-computed hash: compute target hash on-demand
-                    // (only when not already set by resume logic)
-                    if (pe.resumeHash.empty()) {
-                        std::string targetHash = utils::ComputeSHA256(targetPath);
-                        if (!targetHash.empty()) {
-                            pe.resumeHash = targetHash;
-                        }
-                    }
-                    pe.action = FileAction::TRANSFER;
-                    addTransfer();
-                }
+            if (!ec &&
+                existingSize == entry.size &&
+                !entry.sha256.empty() &&
+                utils::ComputeSHA256(targetPath) == entry.sha256) {
+
+                pe.action = FileAction::SKIP;
+                plan.skipFiles++;
             } else {
                 pe.action = FileAction::TRANSFER;
                 addTransfer();

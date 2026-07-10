@@ -1467,16 +1467,22 @@ TransferResult TransferSession::InnerSenderWorker(const std::wstring& sourceDir,
 
     m_stats.speedBytesPerSec = progress.GetSpeed();
 
-    StopReceiveLoop();
     StopHeartbeat();
+
+    if (sock != INVALID_SOCKET) {
+        shutdown(sock, SD_BOTH);
+    }
+
+    StopReceiveLoop();
 
     result = FinalizeResult(std::move(result));
 
     std::wstring report = ReportGenerator::GenerateReport(m_stats, sourceDir, L"");
     ReportGenerator::SaveReport(report, utils::GetExecutableDir() + L"\\reports");
 
-    shutdown(sock, SD_BOTH);
-    closesocket(sock);
+    if (sock != INVALID_SOCKET) {
+        closesocket(sock);
+    }
     m_sock = INVALID_SOCKET;
     WSACleanup();
 
@@ -1587,8 +1593,13 @@ void TransferSession::InnerReceiverWorker(const std::wstring& targetDir, int por
         ReceiverConnectionResult connResult =
             HandleReceiverConnection(sock, targetDir, expectedPairingCode, mode);
 
-        StopReceiveLoop();
         StopHeartbeat();
+
+        if (sock != INVALID_SOCKET) {
+            shutdown(sock, SD_BOTH);
+        }
+
+        StopReceiveLoop();
 
         bool closeSock = false;
         {
@@ -1599,7 +1610,6 @@ void TransferSession::InnerReceiverWorker(const std::wstring& targetDir, int por
             }
         }
         if (closeSock) {
-            shutdown(sock, SD_BOTH);
             closesocket(sock);
         }
 
@@ -1734,6 +1744,8 @@ ReceiverConnectionResult TransferSession::HandleReceiverConnection(SOCKET sock, 
     if (mode == TransferMode::MIRROR) {
         extraFiles = TransferPlanner::FindExtraFiles(manifest, targetDir);
     }
+
+    Log(L"\u6b63\u5728\u751f\u6210\u4f20\u8f93\u8ba1\u5212...");
 
     TransferPlanner planner;
     TransferPlanner::Plan plan = planner.BuildPlan(manifest, targetDir, mode);
