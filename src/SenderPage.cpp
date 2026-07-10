@@ -271,9 +271,9 @@ void SenderPage::OnStartTransfer() {
             PostMessageW(mw->GetHWND(), WM_TRANSFER_PROGRESS, (WPARAM)copy, 0);
         }
     });
-    m_session.SetDoneCallback([mw](const TransferCompletion& comp) {
+    m_session.SetDoneCallback([mw](const TransferResult& comp) {
         if (mw) {
-            TransferCompletion* copy = new TransferCompletion(comp);
+            TransferResult* copy = new TransferResult(comp);
             PostMessageW(mw->GetHWND(), WM_TRANSFER_DONE, (WPARAM)copy, 0);
         }
     });

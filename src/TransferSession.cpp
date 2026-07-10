@@ -575,29 +575,30 @@ void TransferSession::InnerSenderWorker(const std::wstring& sourceDir, const std
         ReportProgress();
     }
 
-    TransferCompletion comp;
-    comp.stats = m_stats;
+    TransferResult result;
+    result.stats = m_stats;
     if (!m_running) {
-        comp.result = TransferResult::Cancelled;
-    } else if (m_stats.failedFiles == 0) {
-        comp.result = TransferResult::Success;
-        Log(L"\u6240\u6709\u6587\u4ef6\u53d1\u9001\u5b8c\u6210");
-        SendStringPacket(sock, (uint8_t)PacketType::DONE, L"");
-    } else if (m_stats.completedFiles > 0) {
-        comp.result = TransferResult::PartialSuccess;
+        result.outcome = TransferOutcome::Cancelled;
+        result.message = L"\u4f20\u8f93\u5df2\u53d6\u6d88";
+        Log(L"\u4f20\u8f93\u672a\u5b8c\u6574\u5b8c\u6210\uff0c\u5df2\u505c\u6b62\u4f1a\u8bdd");
+        SendStringPacket(sock, (uint8_t)PacketType::ERROR_MSG, L"TRANSFER_ABORTED");
+    } else if (m_stats.failedFiles > 0) {
+        result.outcome = TransferOutcome::Failed;
+        result.message = L"\u90e8\u5206\u6587\u4ef6\u4f20\u8f93\u5931\u8d25";
         Log(L"\u4f20\u8f93\u672a\u5b8c\u6574\u5b8c\u6210\uff0c\u5df2\u505c\u6b62\u4f1a\u8bdd");
         SendStringPacket(sock, (uint8_t)PacketType::ERROR_MSG, L"TRANSFER_ABORTED");
     } else {
-        comp.result = TransferResult::Failed;
-        Log(L"\u4f20\u8f93\u672a\u5b8c\u6574\u5b8c\u6210\uff0c\u5df2\u505c\u6b62\u4f1a\u8bdd");
-        SendStringPacket(sock, (uint8_t)PacketType::ERROR_MSG, L"TRANSFER_ABORTED");
+        result.outcome = TransferOutcome::Success;
+        result.message = L"\u4f20\u8f93\u5df2\u5b8c\u6210";
+        Log(L"\u6240\u6709\u6587\u4ef6\u53d1\u9001\u5b8c\u6210");
+        SendStringPacket(sock, (uint8_t)PacketType::DONE, L"");
     }
 
     m_stats.speedBytesPerSec = progress.GetSpeed();
     std::wstring report = ReportGenerator::GenerateReport(m_stats, sourceDir, L"");
     ReportGenerator::SaveReport(report, utils::GetExecutableDir() + L"\\reports");
 
-    if (m_doneCb) m_doneCb(comp);
+    if (m_doneCb) m_doneCb(result);
 
     shutdown(sock, SD_BOTH);
     closesocket(sock);
@@ -714,17 +715,19 @@ void TransferSession::InnerReceiverWorker(const std::wstring& targetDir, int por
         }
 
         if (sessionEnded && m_doneCb) {
-            TransferCompletion comp;
-            comp.stats = m_stats;
-            if (!m_running)
-                comp.result = TransferResult::Cancelled;
-            else if (m_stats.failedFiles == 0)
-                comp.result = TransferResult::Success;
-            else if (m_stats.completedFiles > 0)
-                comp.result = TransferResult::PartialSuccess;
-            else
-                comp.result = TransferResult::Failed;
-            m_doneCb(comp);
+            TransferResult result;
+            result.stats = m_stats;
+            if (!m_running) {
+                result.outcome = TransferOutcome::Cancelled;
+                result.message = L"\u4f20\u8f93\u5df2\u53d6\u6d88";
+            } else if (m_stats.failedFiles > 0) {
+                result.outcome = TransferOutcome::Failed;
+                result.message = L"\u90e8\u5206\u6587\u4ef6\u4f20\u8f93\u5931\u8d25";
+            } else {
+                result.outcome = TransferOutcome::Success;
+                result.message = L"\u4f20\u8f93\u5df2\u5b8c\u6210";
+            }
+            m_doneCb(result);
         }
 
         if (m_running)

@@ -406,18 +406,14 @@ LRESULT MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
 
         case WM_TRANSFER_DONE: {
-            TransferCompletion* comp = (TransferCompletion*)wp;
+            TransferResult* comp = (TransferResult*)wp;
             if (comp) {
                 std::wstring msg;
-                switch (comp->result) {
-                    case TransferResult::Success:        msg = L"\u4f20\u8f93\u6210\u529f"; break;
-                    case TransferResult::PartialSuccess: msg = L"\u90e8\u5206\u6587\u4ef6\u5931\u8d25"; break;
-                    case TransferResult::ConnectionLost: msg = L"\u7f51\u7edc\u8fde\u63a5\u4e2d\u65ad"; break;
-                    case TransferResult::Cancelled:      msg = L"\u7528\u6237\u53d6\u6d88"; break;
-                    case TransferResult::Failed:         msg = L"\u65e0\u6cd5\u8bfb\u53d6\u6216\u5199\u5165\u6587\u4ef6"; break;
+                switch (comp->outcome) {
+                    case TransferOutcome::Success:   msg = L"\u4f20\u8f93\u5df2\u5b8c\u6210"; break;
+                    case TransferOutcome::Failed:    msg = L"\u4f20\u8f93\u5931\u8d25"; break;
+                    case TransferOutcome::Cancelled: msg = L"\u4f20\u8f93\u5df2\u53d6\u6d88"; break;
                 }
-                if (!comp->errorMessage.empty())
-                    msg += L" (" + comp->errorMessage + L")";
                 LogMessage(msg);
                 delete comp;
             }
