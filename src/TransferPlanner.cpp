@@ -51,13 +51,16 @@ TransferPlanner::Plan TransferPlanner::BuildPlan(const Manifest& manifest, const
             addTransfer();
         } else {
             auto existingSize = fs::file_size(targetPath, ec);
-            if (!ec &&
-                existingSize == entry.size &&
-                !entry.sha256.empty() &&
-                utils::ComputeSHA256(targetPath) == entry.sha256) {
-
-                pe.action = FileAction::SKIP;
-                plan.skipFiles++;
+            if (!ec && existingSize == entry.size) {
+                pe.resumeHash = utils::ComputeSHA256(targetPath);
+                if (!pe.resumeHash.empty()) {
+                    pe.action = FileAction::SKIP;
+                    pe.offset = 0;
+                    plan.skipFiles++;
+                } else {
+                    pe.action = FileAction::TRANSFER;
+                    addTransfer();
+                }
             } else {
                 pe.action = FileAction::TRANSFER;
                 addTransfer();

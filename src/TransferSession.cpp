@@ -1094,6 +1094,19 @@ TransferResult TransferSession::InnerSenderWorker(const std::wstring& sourceDir,
     std::string planUtf8 = utils::ToUtf8(planStr);
     TransferPlanner::Plan plan = TransferPlanner::ParsePlanString(planUtf8);
     for (auto& entry : plan.entries) {
+        if (entry.action == FileAction::SKIP && !entry.resumeHash.empty()) {
+            std::wstring fullPath = sourceDir + L"\\" + entry.relativePath;
+            std::string sourceHash = utils::ComputeSHA256(fullPath);
+            if (!sourceHash.empty() && sourceHash == entry.resumeHash) {
+                Log(L"\u5df2\u786e\u8ba4\u8df3\u8fc7(\u54c8\u5e0c\u5339\u914d): " + entry.relativePath);
+            } else {
+                Log(L"\u540c\u540d\u540c\u5927\u5c0f\u6587\u4ef6\u54c8\u5e0c\u4e0d\u5339\u914d\uff0c\u5c06\u4f20\u8f93: " + entry.relativePath);
+                entry.action = FileAction::TRANSFER;
+                entry.offset = 0;
+                entry.resumeHash.clear();
+            }
+        }
+
         if ((entry.action == FileAction::TRANSFER || entry.action == FileAction::OVERWRITE)
                 && entry.offset > 0) {
             std::wstring fullPath = sourceDir + L"\\" + entry.relativePath;
@@ -1128,21 +1141,11 @@ TransferResult TransferSession::InnerSenderWorker(const std::wstring& sourceDir,
             break;
         }
 
-        // On-demand SKIP verification: receiver stored target hash in resumeHash
-        if (entry.offset == 0 && !entry.resumeHash.empty()) {
-            std::wstring skipCheckPath = sourceDir + L"\\" + entry.relativePath;
-            std::string sourceHash = utils::ComputeSHA256(skipCheckPath);
-            if (!sourceHash.empty() && sourceHash == entry.resumeHash) {
-                Log(L"\u5df2\u8df3\u8fc7(\u54c8\u5e0c\u5339\u914d): " + entry.relativePath);
-                completed++;
-                m_stats.completedFiles = completed;
-                m_stats.skippedFiles++;
-                progress.AddTransferred(entry.size);
-                m_stats.transferredBytes = progress.GetTransferred();
-                m_stats.currentFile = entry.relativePath;
-                ReportProgress();
-                continue;
-            }
+        if (entry.action == FileAction::SKIP) {
+            Log(L"\u5df2\u8df3\u8fc7: " + entry.relativePath);
+            m_stats.currentFile = entry.relativePath;
+            ReportProgress();
+            continue;
         }
 
         if (entry.action != FileAction::TRANSFER && entry.action != FileAction::OVERWRITE)
@@ -1781,9 +1784,17 @@ ReceiverConnectionResult TransferSession::HandleReceiverConnection(SOCKET sock, 
     m_stats.totalFiles = plan.totalFiles;
     m_stats.skippedFiles = plan.skipFiles;
 
-    std::unordered_map<std::wstring, int64_t> plannedOffsets;
-    for (const auto& entry : plan.entries)
-        plannedOffsets[entry.relativePath] = entry.offset;
+    std::unordered_map<std::wstring, int64_t> plannedRemainingBytes;
+    std::unordered_map<std::wstring, bool> plannedSkipFiles;
+    for (const auto& entry : plan.entries) {
+        int64_t remaining = 0;
+        if (entry.action == FileAction::TRANSFER || entry.action == FileAction::OVERWRITE) {
+            remaining = entry.size - entry.offset;
+            if (remaining < 0) remaining = 0;
+        }
+        plannedRemainingBytes[entry.relativePath] = remaining;
+        plannedSkipFiles[entry.relativePath] = (entry.action == FileAction::SKIP);
+    }
 
     int received = 0;
     bool receivedDone = false;
@@ -1864,10 +1875,19 @@ ReceiverConnectionResult TransferSession::HandleReceiverConnection(SOCKET sock, 
             std::wstring fileName = utils::FromUtf8(nameA);
 
             std::wstring fullPath = targetDir + L"\\" + fileName;
-            auto plannedIt = plannedOffsets.find(fileName);
-            if (plannedIt != plannedOffsets.end() && offset < plannedIt->second) {
-                m_stats.totalBytes += (plannedIt->second - offset);
-                plannedIt->second = offset;
+            int64_t actualRemaining = fileSize - offset;
+            if (actualRemaining < 0) actualRemaining = 0;
+            auto plannedIt = plannedRemainingBytes.find(fileName);
+            if (plannedIt != plannedRemainingBytes.end() && actualRemaining > plannedIt->second) {
+                m_stats.totalBytes += (actualRemaining - plannedIt->second);
+                auto skipIt = plannedSkipFiles.find(fileName);
+                if (skipIt != plannedSkipFiles.end() && skipIt->second) {
+                    m_stats.totalFiles++;
+                    if (m_stats.skippedFiles > 0)
+                        m_stats.skippedFiles--;
+                    skipIt->second = false;
+                }
+                plannedIt->second = actualRemaining;
             }
 
             m_stats.currentFile = fileName;
