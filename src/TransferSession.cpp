@@ -824,10 +824,9 @@ TransferResult TransferSession::HandleReceiverConnection(SOCKET sock, const std:
     Log(L"\u5df2\u63a5\u6536\u6587\u4ef6\u6e05\u5355: " + std::to_wstring(manifest.GetEntries().size())
         + L" \u4e2a\u6587\u4ef6\uff0c" + utils::FormatBytes(manifest.GetTotalSize()));
 
+    std::vector<std::wstring> extraFiles;
     if (mode == TransferMode::MIRROR) {
-        int deleted = TransferPlanner::DeleteExtraFiles(manifest, targetDir);
-        if (deleted > 0)
-            Log(L"\u5220\u9664\u76ee\u6807\u76ee\u5f55\u591a\u4f59\u6587\u4ef6: " + std::to_wstring(deleted) + L" \u4e2a");
+        extraFiles = TransferPlanner::FindExtraFiles(manifest, targetDir);
     }
 
     TransferPlanner planner;
@@ -1132,6 +1131,17 @@ TransferResult TransferSession::HandleReceiverConnection(SOCKET sock, const std:
     }
 
     Log(L"\u63a5\u6536\u7ed3\u675f");
+
+    if (mode == TransferMode::MIRROR && receivedDone && !extraFiles.empty()) {
+        int deleted = 0;
+        for (const auto& f : extraFiles) {
+            if (DeleteFileW(f.c_str())) {
+                deleted++;
+            }
+        }
+        if (deleted > 0)
+            Log(L"\u955c\u50cf\u5220\u9664\u5b8c\u6210: " + std::to_wstring(deleted) + L" \u4e2a\u6587\u4ef6");
+    }
 
     TransferResult result;
     result.stats = m_stats;

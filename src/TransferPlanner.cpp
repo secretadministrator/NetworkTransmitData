@@ -84,6 +84,39 @@ TransferPlanner::Plan TransferPlanner::BuildPlan(const Manifest& manifest, const
     return plan;
 }
 
+std::vector<std::wstring> TransferPlanner::FindExtraFiles(const Manifest& manifest, const std::wstring& targetDir) {
+    std::unordered_set<std::wstring> expected;
+    for (const auto& e : manifest.GetEntries()) {
+        expected.insert(targetDir + L"\\" + e.relativePath);
+    }
+
+    std::vector<std::wstring> result;
+    std::function<void(const std::wstring&)> scan = [&](const std::wstring& dir) {
+        WIN32_FIND_DATAW ffd = {};
+        std::wstring pattern = dir + L"\\*";
+        HANDLE hFind = FindFirstFileW(pattern.c_str(), &ffd);
+        if (hFind == INVALID_HANDLE_VALUE) return;
+
+        do {
+            std::wstring name = ffd.cFileName;
+            if (name == L"." || name == L"..") continue;
+            std::wstring full = dir + L"\\" + name;
+
+            if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                scan(full);
+            } else {
+                if (expected.find(full) == expected.end()) {
+                    result.push_back(full);
+                }
+            }
+        } while (FindNextFileW(hFind, &ffd));
+        FindClose(hFind);
+    };
+
+    scan(targetDir);
+    return result;
+}
+
 int TransferPlanner::DeleteExtraFiles(const Manifest& manifest, const std::wstring& targetDir) {
     // Build a set of expected paths from manifest
     std::unordered_set<std::wstring> expected;

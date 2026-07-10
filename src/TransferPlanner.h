@@ -28,6 +28,7 @@ public:
 
     Plan BuildPlan(const Manifest& manifest, const std::wstring& targetDir, TransferMode mode = TransferMode::SAFE_COPY);
 
+    static std::vector<std::wstring> FindExtraFiles(const Manifest& manifest, const std::wstring& targetDir);
     static int DeleteExtraFiles(const Manifest& manifest, const std::wstring& targetDir);
 
     static std::string SerializePlan(const Plan& plan);
