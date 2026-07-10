@@ -341,18 +341,6 @@ void TransferSession::InnerSenderWorker(const std::wstring& sourceDir, const std
         WSACleanup(); return;
     }
 
-    Log(L"\u6b63\u5728\u8ba1\u7b97\u6587\u4ef6 SHA-256 \u6821\u9a8c\u503c...");
-    for (auto& entry : files) {
-        if (!m_running) break;
-        std::wstring fullPath = sourceDir + L"\\" + entry.relativePath;
-        entry.sha256 = utils::ComputeSHA256(fullPath);
-        if (entry.sha256.empty()) {
-            Log(L"\u8ba1\u7b97\u6821\u9a8c\u503c\u5931\u8d25: " + entry.relativePath);
-            SendStringPacket(sock, (uint8_t)PacketType::ERROR_MSG, L"HASH_FAILED: " + entry.relativePath);
-            closesocket(sock); m_sock = INVALID_SOCKET;
-            WSACleanup(); return;
-        }
-    }
     if (!m_running) {
         closesocket(sock); m_sock = INVALID_SOCKET;
         WSACleanup(); return;
@@ -410,6 +398,23 @@ void TransferSession::InnerSenderWorker(const std::wstring& sourceDir, const std
     for (const auto& entry : plan.entries) {
         if (!m_running) break;
 
+        // On-demand SKIP verification: receiver stored target hash in resumeHash
+        if (entry.offset == 0 && !entry.resumeHash.empty()) {
+            std::wstring skipCheckPath = sourceDir + L"\\" + entry.relativePath;
+            std::string sourceHash = utils::ComputeSHA256(skipCheckPath);
+            if (!sourceHash.empty() && sourceHash == entry.resumeHash) {
+                Log(L"\u5df2\u8df3\u8fc7(\u54c8\u5e0c\u5339\u914d): " + entry.relativePath);
+                completed++;
+                m_stats.completedFiles = completed;
+                m_stats.skippedFiles++;
+                progress.AddTransferred(entry.size);
+                m_stats.transferredBytes = progress.GetTransferred();
+                m_stats.currentFile = entry.relativePath;
+                ReportProgress();
+                continue;
+            }
+        }
+
         if (entry.action != FileAction::TRANSFER && entry.action != FileAction::OVERWRITE)
             continue;
 
@@ -440,14 +445,20 @@ void TransferSession::InnerSenderWorker(const std::wstring& sourceDir, const std
             continue;
         }
 
-        std::string sha256Hex = entry.sha256;
-        if (sha256Hex.empty()) {
-            Log(L"\u6587\u4ef6\u6821\u9a8c\u503c\u7f3a\u5931: " + entry.relativePath);
+        // Initialize incremental SHA-256
+        Sha256Context hashCtx;
+        bool hashOk = StartSha256(hashCtx);
+        if (!hashOk) {
+            Log(L"\u521d\u59cb\u5316 SHA-256 \u5931\u8d25: " + entry.relativePath);
             m_stats.failedFiles++;
-            SendStringPacket(sock, (uint8_t)PacketType::ERROR_MSG, L"HASH_MISSING");
+            SendStringPacket(sock, (uint8_t)PacketType::ERROR_MSG, L"HASH_INIT_FAILED");
             SendStringPacket(sock, (uint8_t)PacketType::FILE_DONE, entry.relativePath);
             CloseHandle(hFile);
             continue;
+        }
+        if (offset > 0 && !UpdateSha256FromFile(hashCtx, fullPath, offset)) {
+            Log(L"\u8bfb\u53d6\u7eed\u4f20\u524d\u7f00\u5931\u8d25(\u54c8\u5e0c): " + entry.relativePath);
+            hashOk = false;
         }
 
         bool readFileFailed = false;
@@ -472,6 +483,11 @@ void TransferSession::InnerSenderWorker(const std::wstring& sourceDir, const std
                 break;
             }
 
+            if (hashOk && !UpdateSha256(hashCtx, buf.data(), bytesRead)) {
+                Log(L"SHA-256 \u8ba1\u7b97\u5931\u8d25: " + entry.relativePath);
+                hashOk = false;
+            }
+
             if (!SendPacket(sock, (uint8_t)PacketType::FILE_CHUNK, buf.data(), bytesRead)) {
                 Log(L"\u53d1\u9001\u6570\u636e\u5931\u8d25: " + entry.relativePath);
                 chunkSendFailed = true;
@@ -490,9 +506,13 @@ void TransferSession::InnerSenderWorker(const std::wstring& sourceDir, const std
 
         CloseHandle(hFile);
 
-        if (!m_running) break;
+        if (!m_running) {
+            CloseSha256(hashCtx);
+            break;
+        }
 
         if (chunkSendFailed) {
+            CloseSha256(hashCtx);
             m_stats.failedFiles++;
             break;
         }
@@ -502,10 +522,19 @@ void TransferSession::InnerSenderWorker(const std::wstring& sourceDir, const std
             m_stats.failedFiles++;
             SendStringPacket(sock, (uint8_t)PacketType::ERROR_MSG, L"READ_FAILED");
             SendStringPacket(sock, (uint8_t)PacketType::FILE_DONE, entry.relativePath);
+            CloseSha256(hashCtx);
             continue;
         }
 
-        // Send FILE_HASH (always, even if empty)
+        // Finalize SHA-256 and send FILE_HASH
+        std::string sha256Hex = hashOk ? FinishSha256(hashCtx) : std::string();
+        if (sha256Hex.empty()) {
+            Log(L"\u8ba1\u7b97\u6587\u4ef6 SHA-256 \u5931\u8d25: " + entry.relativePath);
+            m_stats.failedFiles++;
+            SendStringPacket(sock, (uint8_t)PacketType::ERROR_MSG, L"HASH_FAILED");
+            SendStringPacket(sock, (uint8_t)PacketType::FILE_DONE, entry.relativePath);
+            continue;
+        }
         {
             std::vector<uint8_t> hashPayload(sha256Hex.begin(), sha256Hex.end());
             if (!SendPacket(sock, (uint8_t)PacketType::FILE_HASH, hashPayload)) {
