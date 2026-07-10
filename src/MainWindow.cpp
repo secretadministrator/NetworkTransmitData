@@ -431,7 +431,9 @@ LRESULT MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
             if (comp) {
                 preserveConnectionLostUi =
-                    (comp->code == TransferResultCode::ConnectionLost);
+                    (comp->code == TransferResultCode::ConnectionLost &&
+                     comp->role == TransferRole::SENDER &&
+                     comp->resumable);
 
                 std::wstring msg;
 

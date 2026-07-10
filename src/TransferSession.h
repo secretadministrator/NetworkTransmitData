@@ -42,6 +42,8 @@ enum class TransferResultCode {
     InternalError
 };
 
+enum class TransferRole { NONE, SENDER, RECEIVER };
+
 struct TransferStats {
     int64_t totalBytes = 0;
     int64_t transferredBytes = 0;
@@ -57,6 +59,7 @@ struct TransferStats {
 
 struct TransferResult {
     TransferResultCode code = TransferResultCode::InternalError;
+    TransferRole role = TransferRole::NONE;
     int socketError = 0;
     bool resumable = false;
     std::wstring message;
@@ -165,6 +168,31 @@ private:
     IoResult RecvStringPacketResult(SOCKET sock, uint8_t expectedType, std::wstring& output);
 
     TransferResult MakeIoFailureResult(const IoResult& io, const std::wstring& operation);
+
+    // ── Receive loop (dedicated thread for heartbeat & packet queue) ──
+    struct ReceivedPacket {
+        uint8_t type = 0;
+        std::vector<uint8_t> payload;
+    };
+
+    std::thread m_receiveThread;
+    std::mutex m_packetQueueMutex;
+    std::condition_variable m_packetQueueCv;
+    std::deque<ReceivedPacket> m_packetQueue;
+    std::atomic<bool> m_receiveLoopRunning{false};
+
+    void StartReceiveLoop(SOCKET sock);
+    void StopReceiveLoop();
+    void ReceiveLoop(SOCKET sock);
+
+    // ── Resume entry validation ──
+    static bool TryGetFileSize(const std::wstring& path, int64_t& size);
+    static bool ValidateResumeEntry(
+        PlanEntry& entry,
+        const std::wstring& targetRoot);
+
+    // ── Finalize result ──
+    TransferResult FinalizeResult(TransferResult result);
 
     // ── Helpers ──
     void NotifyDone(TransferResultCode code, const std::wstring& message);
