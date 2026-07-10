@@ -141,6 +141,14 @@ void MainWindow::CreateLayout() {
         WS_CHILD | WS_VISIBLE,
         0, statusY, client.right, statusH,
         m_hwnd, NULL, m_hInst, NULL);
+
+    // Reconnect button (hidden by default)
+    m_hReconnectButton = CreateWindowExW(0, L"BUTTON", L"\u91cd\u65b0\u8fde\u63a5\u5e76\u7eed\u4f20",
+        WS_CHILD | BS_PUSHBUTTON | BS_OWNERDRAW,
+        client.right / 2 - 80, progBarY - 30, 160, 24,
+        m_hwnd, (HMENU)(INT_PTR)IDC_BTN_RECONNECT, m_hInst, NULL);
+    if (m_hSimSunFont) SendMessageW(m_hReconnectButton, WM_SETFONT, (WPARAM)m_hSimSunFont, TRUE);
+    ShowWindow(m_hReconnectButton, SW_HIDE);
 }
 
 void MainWindow::DestroyPageContent() {
@@ -311,6 +319,17 @@ LRESULT MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 SwitchToPage(AppPage::ROLE_SELECT);
                 return 0;
             }
+            if (id == IDC_BTN_RECONNECT) {
+                EnableWindow(m_hReconnectButton, FALSE);
+                ShowWindow(m_hReconnectButton, SW_HIDE);
+                ShowWindow(m_hProgressBar, SW_SHOW);
+                ShowWindow(m_hProgressText, SW_SHOW);
+                SetWindowTextW(m_hProgressText, L"\u6b63\u5728\u91cd\u65b0\u8fde\u63a5...");
+                if (m_currentPageObj) {
+                    m_currentPageObj->HandleCommand(IDC_BTN_RECONNECT, NULL, 0);
+                }
+                return 0;
+            }
             if (m_currentPageObj &&
                 m_currentPageObj->HandleCommand(id, (HWND)lp, HIWORD(wp))) {
                 return 0;
@@ -407,27 +426,57 @@ LRESULT MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         case WM_TRANSFER_DONE: {
             TransferResult* comp = (TransferResult*)wp;
+
+            bool preserveConnectionLostUi = false;
+
             if (comp) {
-                std::wstring msg = comp->message;
-                if (msg.empty()) {
-                    switch (comp->code) {
-                        case TransferResultCode::Success:        msg = L"\u4f20\u8f93\u5df2\u5b8c\u6210"; break;
-                        case TransferResultCode::Cancelled:      msg = L"\u4f20\u8f93\u5df2\u53d6\u6d88"; break;
-                        case TransferResultCode::ConnectionLost: msg = L"\u8fde\u63a5\u5df2\u4e2d\u65ad\uff0c\u53ef\u4ee5\u91cd\u65b0\u8fde\u63a5\u7eed\u4f20"; break;
-                        case TransferResultCode::FileError:     msg = L"\u4f20\u8f93\u5931\u8d25"; break;
-                        default:                                msg = L"\u4f20\u8f93\u5931\u8d25"; break;
-                    }
+                preserveConnectionLostUi =
+                    (comp->code == TransferResultCode::ConnectionLost);
+
+                std::wstring msg;
+
+                switch (comp->code) {
+                case TransferResultCode::Success:
+                    msg = L"\u4f20\u8f93\u5df2\u5b8c\u6210";
+                    break;
+
+                case TransferResultCode::Cancelled:
+                    msg = L"\u4f20\u8f93\u5df2\u53d6\u6d88";
+                    break;
+
+                case TransferResultCode::ConnectionLost:
+                    msg = L"\u8fde\u63a5\u5df2\u4e2d\u65ad\uff0c\u53ef\u4ee5\u91cd\u65b0\u8fde\u63a5\u7eed\u4f20";
+                    break;
+
+                case TransferResultCode::FileError:
+                case TransferResultCode::ProtocolError:
+                case TransferResultCode::InternalError:
+                default:
+                    msg = comp->message.empty()
+                        ? L"\u4f20\u8f93\u5931\u8d25"
+                        : comp->message;
+                    break;
                 }
+
                 LogMessage(msg);
+
                 delete comp;
+                comp = nullptr;
             }
-            if (!comp || comp->code != TransferResultCode::ConnectionLost) {
+
+            if (!preserveConnectionLostUi) {
                 SendMessageW(m_hProgressBar, PBM_SETPOS, 0, 0);
                 SendMessageW(m_hProgressBar, PBM_SETRANGE32, 0, 100);
                 SetWindowTextW(m_hProgressText, L"");
                 ShowWindow(m_hProgressBar, SW_HIDE);
                 ShowWindow(m_hProgressText, SW_HIDE);
             }
+
+            if (preserveConnectionLostUi && m_hReconnectButton) {
+                ShowWindow(m_hReconnectButton, SW_SHOW);
+                EnableWindow(m_hReconnectButton, TRUE);
+            }
+
             return 0;
         }
     }

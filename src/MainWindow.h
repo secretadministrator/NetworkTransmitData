@@ -51,6 +51,7 @@ private:
     HWND m_hStatusBar = nullptr;
     HWND m_hProgressBar = nullptr;
     HWND m_hProgressText = nullptr;
+    HWND m_hReconnectButton = nullptr;
 
     HFONT m_hSimSunFont = nullptr;
     HFONT m_hCodeFont = nullptr;
@@ -58,6 +59,11 @@ private:
     HBRUSH m_hDarkEditBrush = nullptr;
     int m_senderStep = 0;
     int m_receiverStep = 0;
+
+    std::wstring m_lastSourceDirectory;
+    std::wstring m_lastPeerIp;
+    int m_lastPort = 49321;
+    std::wstring m_lastPairingCode;
 
     void RegisterWindowClass();
     LRESULT WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);

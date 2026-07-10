@@ -47,6 +47,7 @@ bool SenderPage::HandleCommand(int id, HWND, UINT) {
         case IDC_BTN_AUTO_IP:      OnAutoIP(); return true;
         case IDC_BTN_SET_IP:       OnSetIP(); return true;
         case IDC_BTN_RESTORE_IP:   OnRestoreIP(); return true;
+        case IDC_BTN_RECONNECT:    OnStartTransfer(); return true;
     }
     return false;
 }

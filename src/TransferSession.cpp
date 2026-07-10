@@ -107,23 +107,6 @@ bool TransferSession::IsTemporarySocketError(int error)
            error == WSAEINTR;
 }
 
-bool TransferSession::IsHardConnectionError(int error)
-{
-    switch (error) {
-    case WSAECONNRESET:
-    case WSAECONNABORTED:
-    case WSAENETDOWN:
-    case WSAENETRESET:
-    case WSAENETUNREACH:
-    case WSAEHOSTUNREACH:
-    case WSAENOTCONN:
-    case WSAESHUTDOWN:
-        return true;
-    default:
-        return false;
-    }
-}
-
 // ── Retryable send (with send mutex, partial-send safe) ──
 
 IoResult TransferSession::SendAllLocked(
@@ -189,13 +172,9 @@ IoResult TransferSession::SendAllLocked(
             continue;
         }
 
-        if (IsHardConnectionError(error)) {
-            IoResult r{IoStatus::SocketError, error};
-            MarkConnectionLost(sock, r, L"\u53d1\u9001\u786c\u9519\u8bef");
-            return r;
-        }
-
-        return {IoStatus::SocketError, error};
+        IoResult r{IoStatus::SocketError, error};
+        MarkConnectionLost(sock, r, L"\u53d1\u9001 Socket I/O \u9519\u8bef");
+        return r;
     }
 
     return {IoStatus::Ok, 0};
@@ -264,13 +243,9 @@ IoResult TransferSession::RecvExact(
             continue;
         }
 
-        if (IsHardConnectionError(error)) {
-            IoResult r{IoStatus::SocketError, error};
-            MarkConnectionLost(sock, r, L"\u63a5\u6536\u786c\u9519\u8bef");
-            return r;
-        }
-
-        return {IoStatus::SocketError, error};
+        IoResult r{IoStatus::SocketError, error};
+        MarkConnectionLost(sock, r, L"\u63a5\u6536 Socket I/O \u9519\u8bef");
+        return r;
     }
 
     return {IoStatus::Ok, 0};
@@ -375,9 +350,11 @@ IoResult TransferSession::RecvPacketResult(
         }
 
         if (type == static_cast<uint8_t>(PacketType::HEARTBEAT_ACK)) {
+            m_lastPeerActivityTick.store(GetTickCount64());
             continue;
         }
 
+        m_lastPeerActivityTick.store(GetTickCount64());
         return {IoStatus::Ok, 0};
     }
 }
@@ -414,10 +391,99 @@ std::wstring TransferSession::RecvStringPacket(SOCKET sock, uint8_t expectedType
     return utils::FromUtf8(std::string((const char*)payload.data(), payload.size()));
 }
 
-static void SetSocketTimeouts(SOCKET sock, DWORD timeoutMs) {
+IoResult TransferSession::SendStringPacketResult(
+    SOCKET sock,
+    uint8_t type,
+    const std::wstring& text)
+{
+    std::string utf8 = utils::ToUtf8(text);
+    return SendPacketResult(
+        sock,
+        type,
+        reinterpret_cast<const uint8_t*>(utf8.data()),
+        utf8.size());
+}
+
+IoResult TransferSession::RecvStringPacketResult(
+    SOCKET sock,
+    uint8_t expectedType,
+    std::wstring& output)
+{
+    output.clear();
+
+    uint8_t actualType = 0;
+    std::vector<uint8_t> payload;
+
+    IoResult result = RecvPacketResult(sock, actualType, payload);
+    if (!result.IsOk()) {
+        return result;
+    }
+
+    if (actualType != expectedType) {
+        return {IoStatus::ProtocolError, 0};
+    }
+
+    output = utils::FromUtf8(
+        std::string(
+            reinterpret_cast<const char*>(payload.data()),
+            payload.size()));
+
+    return {IoStatus::Ok, 0};
+}
+
+TransferResult TransferSession::MakeIoFailureResult(
+    const IoResult& io,
+    const std::wstring& operation)
+{
+    switch (io.status) {
+    case IoStatus::Cancelled:
+        return MakeResult(TransferResultCode::Cancelled, L"\u4f20\u8f93\u5df2\u53d6\u6d88");
+
+    case IoStatus::PeerClosed:
+        return MakeResult(
+            TransferResultCode::ConnectionLost,
+            operation + L"\uff1a\u5bf9\u7aef\u5df2\u5173\u95ed\u8fde\u63a5");
+
+    case IoStatus::IdleTimeout:
+        return MakeResult(
+            TransferResultCode::ConnectionLost,
+            operation + L"\uff1a\u8fde\u7eed 90 \u79d2\u6ca1\u6709\u7f51\u7edc\u54cd\u5e94");
+
+    case IoStatus::SocketError:
+        return MakeResult(
+            TransferResultCode::ConnectionLost,
+            operation + L"\uff1a\u7f51\u7edc\u9519\u8bef " + std::to_wstring(io.wsaError));
+
+    case IoStatus::ProtocolError:
+        return MakeResult(
+            TransferResultCode::ProtocolError,
+            operation + L"\uff1a\u534f\u8bae\u6570\u636e\u9519\u8bef");
+
+    case IoStatus::Ok:
+    default:
+        return MakeResult(
+            TransferResultCode::InternalError,
+            operation + L"\uff1a\u672a\u77e5\u9519\u8bef");
+    }
+}
+
+static bool SetSocketTimeouts(SOCKET sock, DWORD timeoutMs, int& outError) {
+    outError = 0;
     DWORD timeout = timeoutMs;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
+
+    if (setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO,
+            reinterpret_cast<const char*>(&timeout), sizeof(timeout)) == SOCKET_ERROR) {
+        outError = WSAGetLastError();
+        return false;
+    }
+
+    if (setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO,
+            reinterpret_cast<const char*>(&timeout), sizeof(timeout)) == SOCKET_ERROR) {
+        outError = WSAGetLastError();
+        return false;
+    }
+
+    return true;
 }
 
 static void EnableLowLatencyTcp(SOCKET sock) {
@@ -475,6 +541,23 @@ void TransferSession::StartHeartbeat(SOCKET sock)
             }
 
             ULONGLONG nowTick = GetTickCount64();
+
+            // Check peer activity timeout
+            ULONGLONG lastPeer =
+                m_lastPeerActivityTick.load();
+            if (lastPeer > 0 &&
+                nowTick - lastPeer >= CONNECTION_IDLE_MS) {
+                IoResult timeout{
+                    IoStatus::IdleTimeout,
+                    WSAETIMEDOUT
+                };
+                MarkConnectionLost(
+                    sock,
+                    timeout,
+                    L"\u5bf9\u7aef\u5fc3\u8df3\u8d85\u65f6");
+                return;
+            }
+
             ULONGLONG lastSend =
                 m_lastSendProgressTick.load();
 
@@ -690,7 +773,15 @@ TransferResult TransferSession::InnerSenderWorker(const std::wstring& sourceDir,
     }
     m_sock = sock;
     EnableLowLatencyTcp(sock);
-    SetSocketTimeouts(sock, HANDSHAKE_TIMEOUT_MS);
+    {
+        int err = 0;
+        if (!SetSocketTimeouts(sock, HANDSHAKE_TIMEOUT_MS, err)) {
+            Log(L"\u8bbe\u7f6e\u7f51\u7edc\u8d85\u65f6\u5931\u8d25\uff0c\u9519\u8bef\u7801: " + std::to_wstring(err));
+            closesocket(sock); m_sock = INVALID_SOCKET;
+            WSACleanup();
+            return MakeResult(TransferResultCode::InternalError, L"\u8bbe\u7f6e\u7f51\u7edc\u8d85\u65f6\u5931\u8d25");
+        }
+    }
 
     sockaddr_in addr = {};
     addr.sin_family = AF_INET;
@@ -724,7 +815,16 @@ TransferResult TransferSession::InnerSenderWorker(const std::wstring& sourceDir,
         WSACleanup(); return MakeResult(TransferResultCode::ProtocolError, L"\u914d\u5bf9\u7801\u9a8c\u8bc1\u5931\u8d25");
     }
 
-    SetSocketTimeouts(sock, IO_WAIT_TIMEOUT_MS);
+    {
+        int err = 0;
+        if (!SetSocketTimeouts(sock, IO_WAIT_TIMEOUT_MS, err)) {
+            std::wstring msg = L"\u8bbe\u7f6e\u4f20\u8f93\u8d85\u65f6\u5931\u8d25\uff0c\u9519\u8bef\u7801: " + std::to_wstring(err);
+            Log(msg);
+            closesocket(sock); m_sock = INVALID_SOCKET;
+            WSACleanup();
+            return MakeResult(TransferResultCode::InternalError, msg);
+        }
+    }
 
     EnableTcpKeepAlive(sock);
     StartHeartbeat(sock);
@@ -752,19 +852,40 @@ TransferResult TransferSession::InnerSenderWorker(const std::wstring& sourceDir,
 
     std::string manifestJson = manifest.ToJSON();
     std::vector<uint8_t> manifestPayload(manifestJson.begin(), manifestJson.end());
-    if (!SendPacket(sock, (uint8_t)PacketType::MANIFEST, manifestPayload)) {
-        Log(L"\u53d1\u9001\u6587\u4ef6\u6e05\u5355\u5931\u8d25");
-        closesocket(sock); m_sock = INVALID_SOCKET;
-        WSACleanup(); return MakeResult(TransferResultCode::FileError, L"\u53d1\u9001\u6587\u4ef6\u6e05\u5355\u5931\u8d25");
+    {
+        IoResult io = SendPacketResult(
+            sock,
+            static_cast<uint8_t>(PacketType::MANIFEST),
+            manifestPayload.data(),
+            manifestPayload.size());
+
+        if (!io.IsOk()) {
+            if (io.status != IoStatus::Cancelled) {
+                m_stats.resumable = true;
+            }
+            closesocket(sock); m_sock = INVALID_SOCKET;
+            WSACleanup();
+            return MakeIoFailureResult(io, L"\u53d1\u9001\u6587\u4ef6\u6e05\u5355\u5931\u8d25");
+        }
     }
 
     Log(L"\u5df2\u53d1\u9001\u6587\u4ef6\u6e05\u5355\uff0c\u7b49\u5f85\u63a5\u6536\u7aef\u8ba1\u5212...");
 
-    std::wstring planStr = RecvStringPacket(sock, (uint8_t)PacketType::TRANSFER_PLAN);
-    if (planStr.empty()) {
-        Log(L"\u63a5\u6536\u4f20\u8f93\u8ba1\u5212\u5931\u8d25");
-        closesocket(sock); m_sock = INVALID_SOCKET;
-        WSACleanup(); return MakeResult(TransferResultCode::FileError, L"\u63a5\u6536\u4f20\u8f93\u8ba1\u5212\u5931\u8d25");
+    std::wstring planStr;
+    {
+        IoResult io = RecvStringPacketResult(
+            sock,
+            static_cast<uint8_t>(PacketType::TRANSFER_PLAN),
+            planStr);
+
+        if (!io.IsOk()) {
+            if (io.status != IoStatus::Cancelled) {
+                m_stats.resumable = true;
+            }
+            closesocket(sock); m_sock = INVALID_SOCKET;
+            WSACleanup();
+            return MakeIoFailureResult(io, L"\u63a5\u6536\u4f20\u8f93\u8ba1\u5212\u5931\u8d25");
+        }
     }
 
     std::string planUtf8 = utils::ToUtf8(planStr);
@@ -844,11 +965,21 @@ TransferResult TransferSession::InnerSenderWorker(const std::wstring& sourceDir,
 
         std::wstring headerStr = entry.relativePath + L"\n" + std::to_wstring(fileSize)
             + L"\n" + std::to_wstring(offset);
-        if (!SendStringPacket(sock, (uint8_t)PacketType::FILE_HEADER, headerStr)) {
-            Log(L"\u53d1\u9001\u6587\u4ef6\u5934\u5931\u8d25: " + entry.relativePath);
-            m_stats.failedFiles++;
-            CloseHandle(hFile);
-            continue;
+        {
+            IoResult io = SendStringPacketResult(
+                sock,
+                static_cast<uint8_t>(PacketType::FILE_HEADER),
+                headerStr);
+
+            if (!io.IsOk()) {
+                CloseHandle(hFile);
+                if (io.status != IoStatus::Cancelled) {
+                    m_stats.interruptedFiles++;
+                    m_stats.resumable = true;
+                }
+                result = MakeIoFailureResult(io, L"\u53d1\u9001\u6587\u4ef6\u5934\u5931\u8d25");
+                break;
+            }
         }
 
         // Initialize incremental SHA-256
@@ -1142,7 +1273,17 @@ void TransferSession::InnerReceiverWorker(const std::wstring& targetDir, int por
             m_sock = sock;
         }
         EnableLowLatencyTcp(sock);
-        SetSocketTimeouts(sock, HANDSHAKE_TIMEOUT_MS);
+        {
+            int err = 0;
+            if (!SetSocketTimeouts(sock, HANDSHAKE_TIMEOUT_MS, err)) {
+                Log(L"\u8bbe\u7f6e\u7f51\u7edc\u8d85\u65f6\u5931\u8d25\uff0c\u9519\u8bef\u7801: " + std::to_wstring(err));
+                std::lock_guard<std::mutex> lock(m_sockMutex);
+                if (m_sock == sock) m_sock = INVALID_SOCKET;
+                shutdown(sock, SD_BOTH);
+                closesocket(sock);
+                continue;
+            }
+        }
 
         StopHeartbeat();
 
@@ -1260,7 +1401,13 @@ ReceiverConnectionResult TransferSession::HandleReceiverConnection(SOCKET sock, 
     }
 
     SendStringPacket(sock, (uint8_t)PacketType::PAIRING_RESPONSE, L"OK");
-    SetSocketTimeouts(sock, IO_WAIT_TIMEOUT_MS);
+    {
+        int err = 0;
+        if (!SetSocketTimeouts(sock, IO_WAIT_TIMEOUT_MS, err)) {
+            Log(L"\u8bbe\u7f6e\u4f20\u8f93\u8d85\u65f6\u5931\u8d25\uff0c\u9519\u8bef\u7801: " + std::to_wstring(err));
+            return ReceiverConnectionResult::Failed;
+        }
+    }
     EnableTcpKeepAlive(sock);
     StartHeartbeat(sock);
     Log(L"\u914d\u5bf9\u7801\u9a8c\u8bc1\u6210\u529f\uff01");
@@ -1425,9 +1572,28 @@ ReceiverConnectionResult TransferSession::HandleReceiverConnection(SOCKET sock, 
                 Log(L"\u65e0\u6cd5\u521b\u5efa\u6587\u4ef6: " + fileName);
                 fileOk = false;
             } else if (offset > 0) {
-                LARGE_INTEGER li;
-                li.QuadPart = offset;
-                SetFilePointerEx(hFile, li, NULL, FILE_BEGIN);
+                // Verify .dtpart file size matches expected offset
+                LARGE_INTEGER fileSizeActual;
+                if (!GetFileSizeEx(hFile, &fileSizeActual)) {
+                    Log(L"\u65e0\u6cd5\u83b7\u53d6 .dtpart \u6587\u4ef6\u5927\u5c0f: " + fileName);
+                    fileOk = false;
+                } else if (fileSizeActual.QuadPart != offset) {
+                    Log(L".dtpart \u6587\u4ef6\u5927\u5c0f\u4e0d\u5339\u914d\uff0c\u91cd\u65b0\u4f20\u8f93: " + fileName);
+                    CloseHandle(hFile);
+                    hFile = CreateFileW(normPartPath.c_str(), GENERIC_WRITE, 0, NULL,
+                        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+                    canWrite = (hFile != INVALID_HANDLE_VALUE);
+                    if (hFile == INVALID_HANDLE_VALUE) {
+                        Log(L"\u65e0\u6cd5\u521b\u5efa\u6587\u4ef6: " + fileName);
+                        fileOk = false;
+                    } else {
+                        offset = 0;
+                    }
+                } else {
+                    LARGE_INTEGER li;
+                    li.QuadPart = offset;
+                    SetFilePointerEx(hFile, li, NULL, FILE_BEGIN);
+                }
             }
 
             int64_t remaining = fileSize - offset;

@@ -7,6 +7,8 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <cstdint>
 #include <vector>
 #include "TransferPlanner.h"
@@ -117,6 +119,7 @@ private:
 
     std::atomic<int> m_lastSocketError{0};
     std::atomic<uint64_t> m_heartbeatSequence{0};
+    std::atomic<ULONGLONG> m_lastPeerActivityTick{0};
 
     // ── Constants ──
     static constexpr DWORD IO_WAIT_TIMEOUT_MS = 5000;
@@ -156,7 +159,12 @@ private:
 
     void MarkConnectionLost(SOCKET sock, const IoResult& result, const std::wstring& operation);
     static bool IsTemporarySocketError(int error);
-    static bool IsHardConnectionError(int error);
+
+    // ── String packet result helpers ──
+    IoResult SendStringPacketResult(SOCKET sock, uint8_t type, const std::wstring& text);
+    IoResult RecvStringPacketResult(SOCKET sock, uint8_t expectedType, std::wstring& output);
+
+    TransferResult MakeIoFailureResult(const IoResult& io, const std::wstring& operation);
 
     // ── Helpers ──
     void NotifyDone(TransferResultCode code, const std::wstring& message);
