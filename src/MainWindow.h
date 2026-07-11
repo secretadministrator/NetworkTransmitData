@@ -6,6 +6,8 @@
 #include <string>
 
 #include "IPage.h"
+#include "ConsoleDashboard.h"
+#include "ConsoleLogView.h"
 
 struct TransferResult;
 struct TransferStats;
@@ -32,9 +34,9 @@ public:
     AppPage GetCurrentPage() const { return m_currentPage; }
     void OnTransferProgress(const TransferStats& stats);
 
-    HWND GetLogList() const { return m_hLogList; }
-    HWND GetProgressBar() const { return m_hProgressBar; }
-    HWND GetProgressText() const { return m_hProgressText; }
+    HWND GetLogList() const { return m_logView.GetHWND(); }
+    HWND GetProgressBar() const { return m_dashboard.GetHWND(); }
+    HWND GetProgressText() const { return m_dashboard.GetHWND(); }
 
     HFONT GetUIFont() const { return m_hSimSunFont; }
     UINT GetDpi() const { return m_dpi; }
@@ -48,15 +50,20 @@ private:
     HWND m_pageContainer = nullptr;
     IPage* m_currentPageObj = nullptr;
 
-    HWND m_hLogList = nullptr;
     HWND m_hStatusBar = nullptr;
-    HWND m_hProgressBar = nullptr;
-    HWND m_hProgressText = nullptr;
     HWND m_hReconnectButton = nullptr;
 
     HFONT m_hSimSunFont = nullptr;
-    HBRUSH m_hDarkBgBrush = nullptr;
-    HBRUSH m_hDarkEditBrush = nullptr;
+    HBRUSH m_hBackgroundBrush = nullptr;
+    HBRUSH m_hEditBrush = nullptr;
+    HBRUSH m_hPrimaryButtonBrush = nullptr;
+    HBRUSH m_hPrimaryPressedBrush = nullptr;
+    HBRUSH m_hButtonBrush = nullptr;
+    HBRUSH m_hButtonPressedBrush = nullptr;
+    HPEN m_hPrimaryButtonPen = nullptr;
+    HPEN m_hButtonPen = nullptr;
+    ConsoleDashboard m_dashboard;
+    ConsoleLogView m_logView;
     int m_senderStep = 0;
     int m_receiverStep = 0;
     UINT m_dpi = 96;

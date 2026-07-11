@@ -133,7 +133,7 @@ void ReceiverPage::CreateControls(const RECT& rc) {
     };
 
     // Row 0: Back
-    MakeBtn(IDC_BTN_BACK, L"\u2190 \u8fd4\u56de", x, y, 55, false);
+    MakeBtn(IDC_BTN_BACK, L"[ BACK ]", x, y, 55, false);
     y += rowH + rowGap + 2;
 
     // ── Step 1: Target directory ──
@@ -142,7 +142,7 @@ void ReceiverPage::CreateControls(const RECT& rc) {
     int browseW = 44;
     int editW = ctrlW - (xLabel - x) - labelW - browseW - gap2;
     MakeEdit(IDC_EDIT_DST_DIR, xLabel + labelW, y, editW, true);
-    MakeBtn(IDC_BTN_BROWSE, L"\u6d4f\u89c8", xLabel + labelW + editW + gap2, y, browseW, false);
+    MakeBtn(IDC_BTN_BROWSE, L"[DIR]", xLabel + labelW + editW + gap2, y, browseW, false);
     y += rowH + rowGap;
 
     // Status (always visible)
@@ -170,8 +170,8 @@ void ReceiverPage::CreateControls(const RECT& rc) {
             SendMessageW(hNicCombo, CB_ADDSTRING, 0, (LPARAM)n.c_str());
         SendMessageW(hNicCombo, CB_SETCURSEL, 0, 0);
     }
-    MakeBtn(IDC_BTN_AUTO_IP, L"\u914d\u7f6eIP", xLabel + labelW + comboW + gap2, y, cfgIpW, false);
-    MakeBtn(IDC_BTN_RESTORE_IP, L"\u6062\u590d", xLabel + labelW + comboW + cfgIpW + gap2 * 2, y, restorW, false);
+    MakeBtn(IDC_BTN_AUTO_IP, L"[ IP ]", xLabel + labelW + comboW + gap2, y, cfgIpW, false);
+    MakeBtn(IDC_BTN_RESTORE_IP, L"[RST]", xLabel + labelW + comboW + cfgIpW + gap2 * 2, y, restorW, false);
     y += rowH + rowGap;
 
     // IP customization row (part of Step 2)
@@ -196,7 +196,7 @@ void ReceiverPage::CreateControls(const RECT& rc) {
     SendMessageW(hCombo, CB_SETCURSEL, 0, 0);
     y += rowH + rowGap + 4;
 
-    MakeBtn(IDC_BTN_START, L"\u5f00\u59cb\u63a5\u6536", cx / 2 - 65, y, 130, true);
+    MakeBtn(IDC_BTN_START, L"[ START RX ]", cx / 2 - 65, y, 130, true);
 
     AuditLogger::Instance().Write(
         L"\u63a5\u6536\u9875\u521b\u5efa\u5b8c\u6210\uff0c\u5df2\u521b\u5efa\u81ea\u52a8\u8bc6\u522b\u4f1a\u8bdd");

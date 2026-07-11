@@ -54,6 +54,7 @@ enum class TransferStage {
 struct TransferStats {
     int64_t totalBytes = 0;
     int64_t transferredBytes = 0;
+    int64_t displayTransferredBytes = 0;
     int64_t speedBytesPerSec = 0;
     int64_t recentSpeedBytesPerSec = 0;
     int64_t averageSpeedBytesPerSec = 0;

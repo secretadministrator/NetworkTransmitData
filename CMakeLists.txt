@@ -26,6 +26,8 @@ set(SOURCES
     src/Utils.cpp
     src/AuditLogger.cpp
     src/MainWindow.cpp
+    src/ConsoleDashboard.cpp
+    src/ConsoleLogView.cpp
     src/RoleSelectPage.cpp
     src/SenderPage.cpp
     src/ReceiverPage.cpp

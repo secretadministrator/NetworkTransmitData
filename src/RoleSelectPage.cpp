@@ -1,5 +1,6 @@
 #include "RoleSelectPage.h"
 #include "Resource.h"
+#include "MainWindow.h"
 
 RoleSelectPage::RoleSelectPage(HWND hParent, const RECT& rc, HWND hMainWnd)
     : m_hParent(hParent), m_hMainWnd(hMainWnd) {
@@ -14,6 +15,9 @@ bool RoleSelectPage::HandleCommand(int id, HWND, UINT) {
 }
 
 void RoleSelectPage::CreateControls(const RECT& rc) {
+    MainWindow* mw = reinterpret_cast<MainWindow*>(
+        GetWindowLongPtrW(m_hMainWnd, GWLP_USERDATA));
+    HFONT font = mw ? mw->GetUIFont() : nullptr;
     int cx = rc.right - rc.left;
     int cy = rc.bottom - rc.top;
 
@@ -24,13 +28,15 @@ void RoleSelectPage::CreateControls(const RECT& rc) {
     int startX = (cx - totalW) / 2;
     int startY = cy / 2 - btnH / 2;
 
-    CreateWindowExW(0, L"BUTTON", L"\u2192  \u53d1\u9001\u6587\u4ef6",
+    HWND sendButton = CreateWindowExW(0, L"BUTTON", L"[ TX ]  \u53d1\u9001\u6587\u4ef6",
         WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
         startX, startY, btnW, btnH, m_hParent, (HMENU)IDC_BTN_SEND, NULL, NULL);
+    if (font) SendMessageW(sendButton, WM_SETFONT, (WPARAM)font, TRUE);
 
-    CreateWindowExW(0, L"BUTTON", L"\u2190  \u63a5\u6536\u6587\u4ef6",
+    HWND receiveButton = CreateWindowExW(0, L"BUTTON", L"[ RX ]  \u63a5\u6536\u6587\u4ef6",
         WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
         startX + btnW + gap, startY, btnW, btnH, m_hParent, (HMENU)IDC_BTN_RECV, NULL, NULL);
+    if (font) SendMessageW(receiveButton, WM_SETFONT, (WPARAM)font, TRUE);
 }
 
 void RoleSelectPage::Relayout(const RECT& rc, UINT dpi) {

@@ -8,9 +8,11 @@ public:
     ProgressTracker();
 
     void SetWorkload(int64_t totalBytes, int totalFiles);
+    void SetInFlight(int64_t bytes);
     void AddCommitted(int64_t bytes, int files = 1);
 
     int64_t GetTransferred() const { return m_transferred; }
+    int64_t GetDisplayedTransferred() const;
     int64_t GetRecentSpeed() const;
     int64_t GetAverageSpeed() const;
     int64_t GetSpeed() const;
@@ -20,10 +22,12 @@ public:
     int64_t GetEstimatedTotalSeconds() const;
     int64_t GetWorkTotal() const { return m_totalWork; }
     int64_t GetWorkCompleted() const { return m_completedWork; }
+    int64_t GetDisplayedWorkCompleted() const;
 
 private:
     void Reset();
     int64_t m_transferred = 0;
+    int64_t m_inFlight = 0;
     int64_t m_totalWork = 0;
     int64_t m_completedWork = 0;
     static constexpr int64_t FILE_EQUIVALENT_BYTES = 64 * 1024;

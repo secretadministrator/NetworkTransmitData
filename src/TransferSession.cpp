@@ -457,6 +457,7 @@ TransferResult IoFailure(const IoResult& io, const std::wstring& operation) {
 
 void UpdateStats(const ProgressTracker& progress, TransferStats& stats) {
     stats.transferredBytes = progress.GetTransferred();
+    stats.displayTransferredBytes = progress.GetDisplayedTransferred();
     stats.recentSpeedBytesPerSec = progress.GetRecentSpeed();
     stats.averageSpeedBytesPerSec = progress.GetAverageSpeed();
     stats.speedBytesPerSec = progress.GetSpeed();
@@ -464,7 +465,7 @@ void UpdateStats(const ProgressTracker& progress, TransferStats& stats) {
     stats.elapsedSeconds = progress.GetElapsedSeconds();
     stats.estimatedTotalSeconds = progress.GetEstimatedTotalSeconds();
     stats.overallWorkTotal = progress.GetWorkTotal();
-    stats.overallWorkCompleted = progress.GetWorkCompleted();
+    stats.overallWorkCompleted = progress.GetDisplayedWorkCompleted();
     stats.waitingForIo = stats.stage == TransferStage::Reconnecting;
 }
 
@@ -854,6 +855,7 @@ TransferResult TransferSession::RunSender(const std::wstring& sourceDir,
 
         ++m_stats.retryCount;
         ++m_stats.interruptedFiles;
+        context.progress.SetInFlight(0);
         m_stats.stage = TransferStage::Reconnecting;
         m_stats.stageText = L"连接中断，正在自动重新连接";
         m_stats.waitingForIo = true;
@@ -1145,11 +1147,13 @@ TransferResult TransferSession::RunSenderConnection(const std::wstring& sourceDi
             return IoFailure(io, L"发送大文件头");
         m_stats.currentFile = entry.relativePath;
         m_stats.stageBytes = 0;
+        context.progress.SetInFlight(0);
         ReportProgress();
 
         Crc32 crc;
         std::vector<uint8_t> buffer(LARGE_FILE_CHUNK);
         int64_t remaining = entry.size;
+        bool firstDataReport = true;
         while (remaining > 0) {
             const DWORD request = remaining > LARGE_FILE_CHUNK
                 ? LARGE_FILE_CHUNK : static_cast<DWORD>(remaining);
@@ -1173,7 +1177,10 @@ TransferResult TransferSession::RunSenderConnection(const std::wstring& sourceDi
                 return IoFailure(io, L"发送大文件数据");
             remaining -= readNow;
             m_stats.stageBytes = entry.size - remaining;
-            ReportProgress();
+            context.progress.SetInFlight(m_stats.stageBytes);
+            UpdateStats(context.progress, m_stats);
+            ReportProgress(firstDataReport);
+            firstDataReport = false;
         }
         uint8_t extra = 0;
         DWORD extraRead = 0;
@@ -1315,6 +1322,7 @@ void TransferSession::RunReceiver(const std::wstring& targetDir, int port,
         if (!m_running)
             break;
         if (connection == ReceiverConnectionResult::ConnectionLost) {
+            state.progress.SetInFlight(0);
             m_stats.stage = TransferStage::Reconnecting;
             m_stats.stageText = L"连接中断，正在等待发送端自动重连";
             ++m_stats.retryCount;
@@ -1621,6 +1629,7 @@ ReceiverConnectionResult TransferSession::HandleReceiverConnection(SOCKET socket
             Crc32 crc;
             uint64_t remaining = fileSize;
             bool senderAborted = false;
+            bool firstDataReport = true;
             while (remaining > 0) {
                 std::vector<uint8_t> chunk;
                 uint8_t chunkType = 0;
@@ -1650,7 +1659,10 @@ ReceiverConnectionResult TransferSession::HandleReceiverConnection(SOCKET socket
                 remaining -= dataSize;
                 m_stats.currentFile = entry.relativePath;
                 m_stats.stageBytes = static_cast<int64_t>(fileSize - remaining);
-                ReportProgress();
+                state.progress.SetInFlight(m_stats.stageBytes);
+                UpdateStats(state.progress, m_stats);
+                ReportProgress(firstDataReport);
+                firstDataReport = false;
             }
             std::vector<uint8_t> end;
             uint8_t endType = 0;
