@@ -122,7 +122,7 @@ void SenderPage::CreateControls(const RECT& rc) {
     auto MakeEdit = [&](int id, int ex, int ey, int ew, bool ro) {
         DWORD style = WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL;
         if (ro) style |= ES_READONLY;
-        HWND h = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+        HWND h = CreateWindowExW(0, L"EDIT", L"",
             style, ex, ey, ew, rowH, m_hParent, (HMENU)(INT_PTR)id, m_hInst, NULL);
         if (hFont) SendMessageW(h, WM_SETFONT, (WPARAM)hFont, TRUE);
         return h;
@@ -175,7 +175,7 @@ void SenderPage::CreateControls(const RECT& rc) {
     int cfgIpW = 52;
     int comboW = ctrlW - (xLabel - x) - labelW - cfgIpW - restorW - gap2 * 2;
     HWND hNicCombo = CreateWindowExW(0, L"COMBOBOX", L"",
-        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS | WS_VSCROLL,
         xLabel + labelW, y, comboW, 200, m_hParent, (HMENU)IDC_COMBO_NIC, m_hInst, NULL);
     if (hFont) SendMessageW(hNicCombo, WM_SETFONT, (WPARAM)hFont, TRUE);
     std::vector<std::wstring> nics;
@@ -207,7 +207,7 @@ void SenderPage::CreateControls(const RECT& rc) {
     // ── Step 4: Transfer ──
     MakeLabel(L"\u6a21\u5f0f:", xLabel, y, 48);
     HWND hCombo = CreateWindowExW(0, L"COMBOBOX", L"",
-        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS | WS_VSCROLL,
         xLabel + 50, y, ctrlW - (xLabel - x) - 50, 200, m_hParent, (HMENU)IDC_COMBO_MODE, m_hInst, NULL);
     if (hFont) SendMessageW(hCombo, WM_SETFONT, (WPARAM)hFont, TRUE);
     SendMessageW(hCombo, CB_ADDSTRING, 0, (LPARAM)L"\u5b89\u5168\u590d\u5236");
@@ -230,19 +230,19 @@ void SenderPage::Relayout(const RECT& rc, UINT dpi) {
     };
 
     const int width = rc.right - rc.left;
-    const int margin = dip(20);
-    const int dotW = dip(16);
-    const int labelW = dip(88);
-    const int rowH = dip(30);
-    const int gap = dip(8);
+    const int margin = dip(12);
+    const int dotW = dip(14);
+    const int labelW = dip(78);
+    const int rowH = dip(24);
+    const int gap = dip(4);
     const int xLabel = margin + dotW + dip(6);
     const int contentRight = width - margin;
     int y = dip(12);
 
-    move(IDC_BTN_BACK, margin, y, dip(76), rowH);
+    move(IDC_BTN_BACK, margin, y, dip(68), rowH);
     y += rowH + gap;
 
-    move(IDC_STEP_DOT_1, margin, y + dip(7), dotW, dip(16));
+    move(IDC_STEP_DOT_1, margin, y + dip(4), dotW, dip(14));
     move(600, xLabel, y, labelW, rowH);
     int browseW = dip(68);
     move(IDC_EDIT_SRC_DIR, xLabel + labelW, y,
@@ -255,7 +255,7 @@ void SenderPage::Relayout(const RECT& rc, UINT dpi) {
         contentRight - xLabel - dip(56), rowH);
     y += rowH + gap;
 
-    move(IDC_STEP_DOT_2, margin, y + dip(7), dotW, dip(16));
+    move(IDC_STEP_DOT_2, margin, y + dip(4), dotW, dip(14));
     move(602, xLabel, y, labelW, rowH);
     int restoreW = dip(68), configW = dip(76);
     move(IDC_COMBO_NIC, xLabel + labelW, y,
@@ -271,7 +271,7 @@ void SenderPage::Relayout(const RECT& rc, UINT dpi) {
         (std::max)(dip(120), contentRight - (xLabel + labelW + dip(224))), rowH);
     y += rowH + gap;
 
-    move(IDC_STEP_DOT_3, margin, y + dip(7), dotW, dip(16));
+    move(IDC_STEP_DOT_3, margin, y + dip(4), dotW, dip(14));
     move(605, xLabel, y, labelW, rowH);
     move(IDC_EDIT_PEER_IP, xLabel + labelW, y, dip(180), rowH);
     move(IDC_BTN_SET_IP, xLabel + labelW + dip(188), y, dip(100), rowH);
@@ -280,8 +280,8 @@ void SenderPage::Relayout(const RECT& rc, UINT dpi) {
     move(606, xLabel, y, labelW, rowH);
     move(IDC_COMBO_MODE, xLabel + labelW, y,
         contentRight - (xLabel + labelW), dip(180));
-    y += rowH + dip(12);
-    move(IDC_BTN_START, width / 2 - dip(85), y, dip(170), dip(38));
+    y += rowH + dip(6);
+    move(IDC_BTN_START, width / 2 - dip(78), y, dip(156), dip(30));
 }
 
 void SenderPage::StartDiscovery(const std::wstring& directIP) {

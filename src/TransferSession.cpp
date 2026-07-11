@@ -21,6 +21,7 @@
 #include <cstring>
 #include <deque>
 #include <memory>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace {
@@ -1094,7 +1095,14 @@ TransferResult TransferSession::RunSenderConnection(const std::wstring& sourceDi
             window.push_back(std::move(descriptor));
         }
 
-        for (const auto& descriptor : window) {
+        std::unordered_map<uint64_t, size_t> pendingBatches;
+        pendingBatches.reserve(window.size());
+        for (size_t i = 0; i < window.size(); ++i)
+            pendingBatches.emplace(window[i].id, i);
+
+        std::vector<uint8_t> acknowledged(window.size(), 0);
+        size_t acknowledgedCount = 0;
+        while (acknowledgedCount < window.size()) {
             std::vector<uint8_t> ack;
             io = receiveExpected(PacketType::BATCH_ACK, ack);
             if (!io.IsOk())
@@ -1103,11 +1111,19 @@ TransferResult TransferSession::RunSenderConnection(const std::wstring& sourceDi
             uint64_t batchId = 0;
             uint8_t status = 0;
             if (!ReadU64(ack, pos, batchId) || !ReadU8(ack, pos, status) ||
-                pos != ack.size() || batchId != descriptor.id) {
+                pos != ack.size()) {
                 return MakeResult(TransferResultCode::ProtocolError, L"小文件批次确认不匹配");
+            }
+            const auto pending = pendingBatches.find(batchId);
+            if (pending == pendingBatches.end() || acknowledged[pending->second] != 0) {
+                return MakeResult(TransferResultCode::ConnectionLost,
+                    L"小文件批次确认不属于当前窗口，正在重连恢复");
             }
             if (status != 1)
                 return MakeResult(TransferResultCode::FileError, L"接收端提交小文件批次失败");
+            acknowledged[pending->second] = 1;
+            ++acknowledgedCount;
+            const BatchDescriptor& descriptor = window[pending->second];
             int newlyCommitted = 0;
             int64_t newlyCommittedBytes = 0;
             for (uint64_t id : descriptor.files) {

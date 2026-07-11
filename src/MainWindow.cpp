@@ -358,6 +358,25 @@ LRESULT MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             DrawButton(dis);
             return TRUE;
         }
+        if (dis && dis->CtlType == ODT_COMBOBOX) {
+            HDC hdc = dis->hDC;
+            RECT rc = dis->rcItem;
+            FillRect(hdc, &rc, m_hEditBrush);
+            HPEN oldPen = (HPEN)SelectObject(hdc, m_hButtonPen);
+            HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
+            Rectangle(hdc, rc.left, rc.top, rc.right, rc.bottom);
+            SelectObject(hdc, oldBrush);
+            SelectObject(hdc, oldPen);
+            wchar_t text[256] = {};
+            if (dis->itemID != (UINT)-1)
+                SendMessageW(dis->hwndItem, CB_GETLBTEXT, dis->itemID, (LPARAM)text);
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, (dis->itemState & ODS_DISABLED) ? console_theme::TEXT_DIM : console_theme::TEXT);
+            SelectObject(hdc, m_hSimSunFont);
+            InflateRect(&rc, -8, 0);
+            DrawTextW(hdc, text, -1, &rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            return TRUE;
+        }
         break;
     }
     case WM_CTLCOLORSTATIC: {
