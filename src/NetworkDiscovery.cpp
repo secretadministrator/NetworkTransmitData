@@ -1,6 +1,7 @@
 #include "NetworkDiscovery.h"
 #include "Resource.h"
 #include "Utils.h"
+#include "Version.h"
 #include <ws2tcpip.h>
 #include <vector>
 
@@ -12,20 +13,28 @@ void NetworkDiscovery::Notify(DWORD msg) {
         PostMessageW(m_hNotifyWnd, msg, 0, 0);
 }
 
-bool NetworkDiscovery::StartSenderDiscovery(HWND hNotifyWnd, int port) {
+bool NetworkDiscovery::StartSenderDiscovery(HWND hNotifyWnd, int port,
+    const std::wstring& directIP) {
     Stop();
     m_hNotifyWnd = hNotifyWnd;
     m_running = true;
-    m_worker = std::thread(&NetworkDiscovery::SenderWorker, this, port);
+    m_worker = std::thread(&NetworkDiscovery::SenderWorker, this, port, directIP);
     return true;
 }
 
-bool NetworkDiscovery::StartReceiverListener(HWND hNotifyWnd, int port) {
+bool NetworkDiscovery::StartReceiverListener(HWND hNotifyWnd, int port,
+    const std::wstring& sessionToken) {
     Stop();
     m_hNotifyWnd = hNotifyWnd;
     m_running = true;
+    m_sessionToken = sessionToken;
     m_worker = std::thread(&NetworkDiscovery::ReceiverWorker, this, port);
     return true;
+}
+
+PeerInfo NetworkDiscovery::GetLastPeer() const {
+    std::lock_guard<std::mutex> lock(m_peerMutex);
+    return m_lastPeer;
 }
 
 void NetworkDiscovery::Stop() {
@@ -55,7 +64,7 @@ static std::vector<sockaddr_in> GetBroadcastTargets(int port) {
     return targets;
 }
 
-void NetworkDiscovery::SenderWorker(int port) {
+void NetworkDiscovery::SenderWorker(int port, std::wstring directIP) {
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
 
@@ -74,8 +83,17 @@ void NetworkDiscovery::SenderWorker(int port) {
     ioctlsocket(sock, FIONBIO, &nonblock);
 
     auto targets = GetBroadcastTargets(port);
+    if (!directIP.empty()) {
+        sockaddr_in direct = {};
+        direct.sin_family = AF_INET;
+        direct.sin_port = htons((u_short)port);
+        std::string directA = utils::ToUtf8(directIP);
+        if (InetPtonA(AF_INET, directA.c_str(), &direct.sin_addr) == 1)
+            targets.push_back(direct);
+    }
 
-    std::wstring wPacket = L"DirectTransfer:DISCOVER:" + GetMachineName();
+    std::wstring wPacket = L"DirectTransfer:DISCOVER:"
+        + std::to_wstring(version::PROTOCOL_VERSION) + L":" + GetMachineName();
     std::string packet = utils::ToUtf8(wPacket);
 
     sockaddr_in from = {};
@@ -103,12 +121,25 @@ void NetworkDiscovery::SenderWorker(int port) {
             recvBuf[received] = '\0';
             std::string resp(recvBuf);
             if (resp.find("DirectTransfer:RESPONSE:") == 0) {
-                std::string remoteMachine = resp.substr(24);
+                std::string fields = resp.substr(24);
+                size_t first = fields.find(':');
+                size_t second = first == std::string::npos
+                    ? std::string::npos : fields.find(':', first + 1);
+                if (first == std::string::npos || second == std::string::npos)
+                    continue;
+                int protocolVersion = atoi(fields.substr(0, first).c_str());
+                std::string token = fields.substr(first + 1, second - first - 1);
+                std::string remoteMachine = fields.substr(second + 1);
                 char ipBuf[64] = {};
                 InetNtopA(AF_INET, &from.sin_addr, ipBuf, sizeof(ipBuf));
-                m_lastPeer.ip = utils::FromUtf8(ipBuf);
-                m_lastPeer.machineName = utils::FromUtf8(remoteMachine);
-                m_lastPeer.port = port;
+                {
+                    std::lock_guard<std::mutex> lock(m_peerMutex);
+                    m_lastPeer.ip = utils::FromUtf8(ipBuf);
+                    m_lastPeer.machineName = utils::FromUtf8(remoteMachine);
+                    m_lastPeer.sessionToken = utils::FromUtf8(token);
+                    m_lastPeer.protocolVersion = protocolVersion;
+                    m_lastPeer.port = port;
+                }
 
                 Notify(WM_DISCOVERY_FOUND);
                 break;
@@ -145,7 +176,9 @@ void NetworkDiscovery::ReceiverWorker(int port) {
     u_long nonblock = 1;
     ioctlsocket(sock, FIONBIO, &nonblock);
 
-    std::wstring wResp = L"DirectTransfer:RESPONSE:" + GetMachineName();
+    std::wstring wResp = L"DirectTransfer:RESPONSE:"
+        + std::to_wstring(version::PROTOCOL_VERSION) + L":"
+        + m_sessionToken + L":" + GetMachineName();
     std::string response = utils::ToUtf8(wResp);
 
     sockaddr_in from = {};
@@ -163,12 +196,19 @@ void NetworkDiscovery::ReceiverWorker(int port) {
                     (sockaddr*)&from, sizeof(from));
 
                 std::string remoteMachine = req.substr(23);
+                size_t separator = remoteMachine.find(':');
+                if (separator != std::string::npos)
+                    remoteMachine = remoteMachine.substr(separator + 1);
                 char ipBuf[64] = {};
                 InetNtopA(AF_INET, &from.sin_addr, ipBuf, sizeof(ipBuf));
 
-                m_lastPeer.machineName = utils::FromUtf8(remoteMachine);
-                m_lastPeer.ip = utils::FromUtf8(ipBuf);
-                m_lastPeer.port = port;
+                {
+                    std::lock_guard<std::mutex> lock(m_peerMutex);
+                    m_lastPeer.machineName = utils::FromUtf8(remoteMachine);
+                    m_lastPeer.ip = utils::FromUtf8(ipBuf);
+                    m_lastPeer.protocolVersion = version::PROTOCOL_VERSION;
+                    m_lastPeer.port = port;
+                }
 
                 Notify(WM_DISCOVERY_FOUND);
             }

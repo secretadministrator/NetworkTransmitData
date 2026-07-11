@@ -7,6 +7,7 @@
 #include "AuditLogger.h"
 #include "IpConfigurator.h"
 #include "Utils.h"
+#include "Version.h"
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nCmdShow) {
     INITCOMMONCONTROLSEX icex = {};
@@ -19,7 +20,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nCmdShow) {
     AppConfig::Instance();
 
     AuditLogger::Instance().SetLogDir(utils::GetExecutableDir() + L"\\logs");
-    AuditLogger::Instance().Write(L"DirectTransfer \u542f\u52a8");
+    AuditLogger::Instance().Write(
+        L"DirectTransfer " + std::wstring(version::APP_VERSION) + L" \u542f\u52a8");
 
     MainWindow mainWnd;
     if (!mainWnd.Create(hInst, nCmdShow)) {

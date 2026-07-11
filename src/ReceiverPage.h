@@ -14,6 +14,7 @@ public:
     ~ReceiverPage();
     bool HandleCommand(int id, HWND hwndCtl, UINT codeNotify) override;
     bool HandleMessage(UINT msg, WPARAM wp, LPARAM lp) override;
+    void Relayout(const RECT& rc, UINT dpi) override;
 
 private:
     enum { STEP_DIR = 0, STEP_NET, STEP_GO, STEP_MAX };
@@ -23,7 +24,7 @@ private:
     HWND m_hMainWnd;
     std::wstring m_targetDir;
     std::wstring m_senderIP;
-    std::wstring m_pairingCode;
+    std::wstring m_sessionToken;
     int m_currentStep = 0;
 
     PairingHandler m_pairing;

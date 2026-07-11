@@ -32,3 +32,19 @@ void RoleSelectPage::CreateControls(const RECT& rc) {
         WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
         startX + btnW + gap, startY, btnW, btnH, m_hParent, (HMENU)IDC_BTN_RECV, NULL, NULL);
 }
+
+void RoleSelectPage::Relayout(const RECT& rc, UINT dpi) {
+    auto dip = [dpi](int value) { return MulDiv(value, static_cast<int>(dpi), 96); };
+    int cx = rc.right - rc.left;
+    int cy = rc.bottom - rc.top;
+    int btnW = dip(190);
+    int btnH = dip(48);
+    int gap = dip(24);
+    int totalW = btnW * 2 + gap;
+    int startX = (cx - totalW) / 2;
+    int startY = (cy - btnH) / 2;
+    MoveWindow(GetDlgItem(m_hParent, IDC_BTN_SEND), startX, startY,
+        btnW, btnH, TRUE);
+    MoveWindow(GetDlgItem(m_hParent, IDC_BTN_RECV), startX + btnW + gap,
+        startY, btnW, btnH, TRUE);
+}

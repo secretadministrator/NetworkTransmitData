@@ -5,8 +5,8 @@
 
 enum class PacketType : uint8_t {
     DISCOVER_RESPONSE = 0x01,
-    PAIRING_REQUEST = 0x02,
-    PAIRING_RESPONSE = 0x03,
+    SERVER_HELLO = 0x02,
+    CLIENT_HELLO = 0x03,
     MANIFEST = 0x04,
     TRANSFER_PLAN = 0x05,
     FILE_HEADER = 0x06,
@@ -20,6 +20,8 @@ enum class PacketType : uint8_t {
 
     HEARTBEAT = 0x0E,
     HEARTBEAT_ACK = 0x0F,
+    HELLO_ACK = 0x10,
+    PLAN_PROGRESS = 0x11,
 
     ERROR_MSG = 0xFF,
     DONE = 0x00

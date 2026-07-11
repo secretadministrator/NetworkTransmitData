@@ -6,10 +6,13 @@
 #include <functional>
 #include <thread>
 #include <atomic>
+#include <mutex>
 
 struct PeerInfo {
     std::wstring ip;
     std::wstring machineName;
+    std::wstring sessionToken;
+    int protocolVersion = 0;
     int port = 0;
 };
 
@@ -18,11 +21,13 @@ public:
     NetworkDiscovery();
     ~NetworkDiscovery();
 
-    bool StartSenderDiscovery(HWND hNotifyWnd, int port);
-    bool StartReceiverListener(HWND hNotifyWnd, int port);
+    bool StartSenderDiscovery(HWND hNotifyWnd, int port,
+        const std::wstring& directIP = L"");
+    bool StartReceiverListener(HWND hNotifyWnd, int port,
+        const std::wstring& sessionToken);
     void Stop();
 
-    PeerInfo GetLastPeer() const { return m_lastPeer; }
+    PeerInfo GetLastPeer() const;
     static std::wstring GetLocalIP();
 
 private:
@@ -31,8 +36,11 @@ private:
     std::thread m_worker;
     HWND m_hNotifyWnd = nullptr;
     PeerInfo m_lastPeer;
+    mutable std::mutex m_peerMutex;
+    std::wstring m_sessionToken;
+    std::wstring m_directIP;
 
-    void SenderWorker(int port);
+    void SenderWorker(int port, std::wstring directIP);
     void ReceiverWorker(int port);
     void Notify(DWORD msg);
     static std::wstring GetMachineName();

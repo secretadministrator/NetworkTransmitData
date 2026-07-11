@@ -6,4 +6,5 @@ struct IPage {
     virtual ~IPage() = default;
     virtual bool HandleCommand(int id, HWND hwndCtl, UINT codeNotify) = 0;
     virtual bool HandleMessage(UINT msg, WPARAM wp, LPARAM lp) { return false; }
+    virtual void Relayout(const RECT& rc, UINT dpi) {}
 };

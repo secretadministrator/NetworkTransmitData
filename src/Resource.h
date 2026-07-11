@@ -8,7 +8,6 @@
 #define IDC_BTN_START          104
 #define IDC_BTN_CANCEL         105
 #define IDC_BTN_BROWSE         106
-#define IDC_BTN_CONFIRM_CODE   107
 #define IDC_BTN_RETRY_DISCOVER 108
 #define IDC_BTN_AUTO_IP         109
 #define IDC_BTN_SET_IP          110
@@ -22,12 +21,10 @@
 
 #define IDC_EDIT_SRC_DIR       201
 #define IDC_EDIT_DST_DIR       202
-#define IDC_EDIT_CODE          203
 
 #define IDC_LIST_LOG           301
 #define IDC_PROGRESS           302
 #define IDC_PROGRESS_TEXT      303
-#define IDC_PAIRING_DISPLAY    304
 #define IDC_DISCOVERY_STATUS   305
 #define IDC_STAT_STATUS        306
 #define IDC_STAT_SPEED         307
@@ -47,7 +44,6 @@
 // Custom window messages (for cross-thread UI updates)
 #define WM_DISCOVERY_FOUND     (WM_USER + 100)
 #define WM_DISCOVERY_FAILED    (WM_USER + 101)
-#define WM_PAIRING_RESULT      (WM_USER + 102)
 #define WM_TRANSFER_PROGRESS   (WM_USER + 103)
 #define WM_TRANSFER_LOG        (WM_USER + 104)
 #define WM_TRANSFER_DONE       (WM_USER + 105)

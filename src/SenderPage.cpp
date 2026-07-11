@@ -6,14 +6,16 @@
 #include "IpConfigurator.h"
 #include "Utils.h"
 #include "AuditLogger.h"
+#include "Version.h"
 #include <commctrl.h>
 #include <ws2tcpip.h>
 #include <cwctype>
+#include <algorithm>
 
-static const int STEP_IDS[4][7] = {
+static const int STEP_IDS[3][8] = {
     { IDC_EDIT_SRC_DIR, IDC_BTN_BROWSE, 0 },
-    { IDC_COMBO_NIC, IDC_BTN_AUTO_IP, IDC_BTN_RESTORE_IP, IDC_EDIT_CUSTOM_IP, IDC_EDIT_CUSTOM_MASK, 0 },
-    { IDC_EDIT_PEER_IP, IDC_BTN_SET_IP, IDC_EDIT_CODE, IDC_BTN_CONFIRM_CODE, 0 },
+    { IDC_COMBO_NIC, IDC_BTN_AUTO_IP, IDC_BTN_RESTORE_IP, IDC_EDIT_CUSTOM_IP,
+      IDC_EDIT_CUSTOM_MASK, IDC_EDIT_PEER_IP, IDC_BTN_SET_IP, 0 },
     { IDC_COMBO_MODE, IDC_BTN_START, 0 },
 };
 static const int DOT_IDS[] = { IDC_STEP_DOT_1, IDC_STEP_DOT_2, IDC_STEP_DOT_3, IDC_STEP_DOT_4 };
@@ -43,7 +45,6 @@ bool SenderPage::HandleCommand(int id, HWND, UINT) {
     switch (id) {
         case IDC_BTN_BROWSE:       OnBrowse(); return true;
         case IDC_BTN_START:        OnStartTransfer(); return true;
-        case IDC_BTN_CONFIRM_CODE: OnConfirmCode(); return true;
         case IDC_BTN_AUTO_IP:      OnAutoIP(); return true;
         case IDC_BTN_SET_IP:       OnSetIP(); return true;
         case IDC_BTN_RESTORE_IP:   OnRestoreIP(); return true;
@@ -55,12 +56,19 @@ bool SenderPage::HandleCommand(int id, HWND, UINT) {
 bool SenderPage::HandleMessage(UINT msg, WPARAM, LPARAM) {
     if (msg == WM_DISCOVERY_FOUND) {
         PeerInfo peer = m_discovery.GetLastPeer();
+        if (peer.protocolVersion != version::PROTOCOL_VERSION || peer.sessionToken.empty()) {
+            SetDlgItemTextW(m_hParent, IDC_DISCOVERY_STATUS,
+                L"\u53d1\u73b0\u7684\u63a5\u6536\u7aef\u7248\u672c\u4e0d\u517c\u5bb9");
+            return true;
+        }
         m_peerIP = peer.ip;
+        m_sessionToken = peer.sessionToken;
         std::wstring status = L"\u5df2\u53d1\u73b0: " + peer.machineName + L" (" + peer.ip + L")";
         SetDlgItemTextW(m_hParent, IDC_DISCOVERY_STATUS, status.c_str());
         SetDlgItemTextW(m_hParent, IDC_EDIT_PEER_IP, peer.ip.c_str());
         MainWindow* mw = (MainWindow*)GetWindowLongPtrW(m_hMainWnd, GWLP_USERDATA);
         if (mw) mw->LogMessage(L"\u5df2\u81ea\u52a8\u53d1\u73b0\u63a5\u6536\u7aef: " + peer.ip);
+        AdvanceToStep(STEP_GO);
         return true;
     }
     if (msg == WM_DISCOVERY_FAILED) {
@@ -120,10 +128,12 @@ void SenderPage::CreateControls(const RECT& rc) {
         return h;
     };
 
+    int nextLabelId = 600;
     auto MakeLabel = [&](const wchar_t* text, int lx, int ly, int lw) {
         HWND h = CreateWindowExW(0, L"STATIC", text,
             WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
-            lx, ly + 2, lw, rowH - 2, m_hParent, NULL, m_hInst, NULL);
+            lx, ly + 2, lw, rowH - 2, m_hParent,
+            (HMENU)(INT_PTR)nextLabelId++, m_hInst, NULL);
         if (hFont) SendMessageW(h, WM_SETFONT, (WPARAM)hFont, TRUE);
         return h;
     };
@@ -152,7 +162,7 @@ void SenderPage::CreateControls(const RECT& rc) {
     // Informational status
     MakeLabel(L"\u72b6\u6001:", xLabel, y, 32);
     CreateWindowExW(0, L"STATIC", L"\u8bf7\u5148\u9009\u62e9\u6e90\u76ee\u5f55",
-        WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
+        WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP | SS_ENDELLIPSIS | SS_NOPREFIX,
         xLabel + 34, y + 2, ctrlW - (xLabel - x) - 34, rowH - 2,
         m_hParent, (HMENU)IDC_DISCOVERY_STATUS, m_hInst, NULL);
     if (hFont) SendMessageW(GetDlgItem(m_hParent, IDC_DISCOVERY_STATUS), WM_SETFONT, (WPARAM)hFont, TRUE);
@@ -190,16 +200,11 @@ void SenderPage::CreateControls(const RECT& rc) {
     // ── Step 3: Connection ──
     MakeDot(2);
     MakeLabel(L"\u8fde\u63a5:", xLabel, y, labelW);
-    MakeEdit(IDC_EDIT_PEER_IP, xLabel + labelW, y, 120, false);
-    y += rowH + rowGap;
-
-    MakeLabel(L"\u914d\u5bf9\u7801:", xLabel, y, labelW);
-    MakeEdit(IDC_EDIT_CODE, xLabel + labelW, y, 80, false);
-    MakeBtn(IDC_BTN_CONFIRM_CODE, L"\u786e\u8ba4", xLabel + labelW + 86, y, 44, true);
+    MakeEdit(IDC_EDIT_PEER_IP, xLabel + labelW, y, 150, false);
+    MakeBtn(IDC_BTN_SET_IP, L"\u4f7f\u7528\u6b64 IP", xLabel + labelW + 156, y, 76, true);
     y += rowH + rowGap;
 
     // ── Step 4: Transfer ──
-    MakeDot(3);
     MakeLabel(L"\u6a21\u5f0f:", xLabel, y, 48);
     HWND hCombo = CreateWindowExW(0, L"COMBOBOX", L"",
         WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
@@ -214,11 +219,74 @@ void SenderPage::CreateControls(const RECT& rc) {
     MakeBtn(IDC_BTN_START, L"\u5f00\u59cb\u4f20\u8f93", cx / 2 - 65, y, 130, true);
 
     AuditLogger::Instance().Write(L"\u53d1\u9001\u9875\u521b\u5efa\u5b8c\u6210");
+    Relayout(rc, mw ? mw->GetDpi() : 96);
 }
 
-void SenderPage::StartDiscovery() {
+void SenderPage::Relayout(const RECT& rc, UINT dpi) {
+    auto dip = [dpi](int value) { return MulDiv(value, static_cast<int>(dpi), 96); };
+    auto move = [&](int id, int x, int y, int w, int h) {
+        HWND control = GetDlgItem(m_hParent, id);
+        if (control) MoveWindow(control, x, y, (std::max)(0, w), h, TRUE);
+    };
+
+    const int width = rc.right - rc.left;
+    const int margin = dip(20);
+    const int dotW = dip(16);
+    const int labelW = dip(88);
+    const int rowH = dip(30);
+    const int gap = dip(8);
+    const int xLabel = margin + dotW + dip(6);
+    const int contentRight = width - margin;
+    int y = dip(12);
+
+    move(IDC_BTN_BACK, margin, y, dip(76), rowH);
+    y += rowH + gap;
+
+    move(IDC_STEP_DOT_1, margin, y + dip(7), dotW, dip(16));
+    move(600, xLabel, y, labelW, rowH);
+    int browseW = dip(68);
+    move(IDC_EDIT_SRC_DIR, xLabel + labelW, y,
+        contentRight - (xLabel + labelW) - browseW - gap, rowH);
+    move(IDC_BTN_BROWSE, contentRight - browseW, y, browseW, rowH);
+    y += rowH + gap;
+
+    move(601, xLabel, y, dip(52), rowH);
+    move(IDC_DISCOVERY_STATUS, xLabel + dip(56), y,
+        contentRight - xLabel - dip(56), rowH);
+    y += rowH + gap;
+
+    move(IDC_STEP_DOT_2, margin, y + dip(7), dotW, dip(16));
+    move(602, xLabel, y, labelW, rowH);
+    int restoreW = dip(68), configW = dip(76);
+    move(IDC_COMBO_NIC, xLabel + labelW, y,
+        contentRight - (xLabel + labelW) - restoreW - configW - gap * 2, rowH);
+    move(IDC_BTN_AUTO_IP, contentRight - restoreW - configW - gap, y, configW, rowH);
+    move(IDC_BTN_RESTORE_IP, contentRight - restoreW, y, restoreW, rowH);
+    y += rowH + gap;
+
+    move(603, xLabel, y, labelW, rowH);
+    move(IDC_EDIT_CUSTOM_IP, xLabel + labelW, y, dip(160), rowH);
+    move(604, xLabel + labelW + dip(168), y, dip(52), rowH);
+    move(IDC_EDIT_CUSTOM_MASK, xLabel + labelW + dip(224), y,
+        (std::max)(dip(120), contentRight - (xLabel + labelW + dip(224))), rowH);
+    y += rowH + gap;
+
+    move(IDC_STEP_DOT_3, margin, y + dip(7), dotW, dip(16));
+    move(605, xLabel, y, labelW, rowH);
+    move(IDC_EDIT_PEER_IP, xLabel + labelW, y, dip(180), rowH);
+    move(IDC_BTN_SET_IP, xLabel + labelW + dip(188), y, dip(100), rowH);
+    y += rowH + gap;
+
+    move(606, xLabel, y, labelW, rowH);
+    move(IDC_COMBO_MODE, xLabel + labelW, y,
+        contentRight - (xLabel + labelW), dip(180));
+    y += rowH + dip(12);
+    move(IDC_BTN_START, width / 2 - dip(85), y, dip(170), dip(38));
+}
+
+void SenderPage::StartDiscovery(const std::wstring& directIP) {
     int port = AppConfig::Instance().port;
-    m_discovery.StartSenderDiscovery(m_hMainWnd, port);
+    m_discovery.StartSenderDiscovery(m_hMainWnd, port, directIP);
 }
 
 void SenderPage::OnBrowse() {
@@ -231,7 +299,7 @@ void SenderPage::OnBrowse() {
         SetDlgItemTextW(m_hParent, IDC_DISCOVERY_STATUS,
             L"\u6e90\u76ee\u5f55\u5df2\u9009\u62e9\uff0c\u53ef\u914d\u7f6e IP \u6216\u76f4\u63a5\u8f93\u5165\u5bf9\u65b9 IP");
         StartDiscovery();
-        AdvanceToStep(STEP_PAIR);
+        AdvanceToStep(STEP_NET);
     }
 }
 
@@ -247,10 +315,6 @@ void SenderPage::OnStartTransfer() {
     }
     if (m_peerIP.empty()) {
         MessageBoxW(m_hMainWnd, L"\u5c1a\u672a\u8bbe\u7f6e\u5bf9\u65b9 IP", L"\u63d0\u793a", MB_OK | MB_ICONINFORMATION);
-        return;
-    }
-    if (m_pairingCode.empty()) {
-        MessageBoxW(m_hMainWnd, L"\u8bf7\u5148\u8f93\u5165\u914d\u5bf9\u7801\u5e76\u70b9\u51fb\u786e\u8ba4", L"\u63d0\u793a", MB_OK | MB_ICONINFORMATION);
         return;
     }
     if (m_session.IsRunning()) {
@@ -278,39 +342,10 @@ void SenderPage::OnStartTransfer() {
             PostMessageW(mw->GetHWND(), WM_TRANSFER_DONE, (WPARAM)copy, 0);
         }
     });
-    if (!m_session.StartAsSender(m_sourceDir, m_peerIP, port, m_pairingCode)) {
+    if (!m_session.StartAsSender(m_sourceDir, m_peerIP, port, m_sessionToken)) {
         MessageBoxW(m_hMainWnd, L"\u542f\u52a8\u4f20\u8f93\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5",
             L"\u9519\u8bef", MB_OK | MB_ICONERROR);
     }
-}
-
-void SenderPage::OnConfirmCode() {
-    wchar_t buf[16] = {};
-    GetDlgItemTextW(m_hParent, IDC_EDIT_CODE, buf, 16);
-    std::wstring code = buf;
-    bool valid = (code.size() == 6);
-    for (wchar_t ch : code) {
-        if (!iswdigit(ch)) {
-            valid = false;
-            break;
-        }
-    }
-
-    MainWindow* mw = (MainWindow*)GetWindowLongPtrW(m_hMainWnd, GWLP_USERDATA);
-    if (!valid) {
-        m_pairingCode.clear();
-        SetDlgItemTextW(m_hParent, IDC_DISCOVERY_STATUS,
-            L"\u914d\u5bf9\u7801\u5fc5\u987b\u662f 6 \u4f4d\u6570\u5b57");
-        MessageBoxW(m_hMainWnd, L"\u8bf7\u8f93\u5165\u63a5\u6536\u7aef\u663e\u793a\u7684 6 \u4f4d\u6570\u5b57\u914d\u5bf9\u7801",
-            L"\u914d\u5bf9\u7801\u65e0\u6548", MB_OK | MB_ICONINFORMATION);
-        return;
-    }
-
-    m_pairingCode = code;
-    if (mw) mw->LogMessage(L"\u914d\u5bf9\u7801\u5df2\u4fdd\u5b58\uff0c\u5c06\u5728\u5f00\u59cb\u4f20\u8f93\u65f6\u9a8c\u8bc1");
-    SetDlgItemTextW(m_hParent, IDC_DISCOVERY_STATUS,
-        L"\u914d\u5bf9\u7801\u5df2\u4fdd\u5b58\uff0c\u5f00\u59cb\u4f20\u8f93\u65f6\u9a8c\u8bc1");
-    AdvanceToStep(STEP_GO);
 }
 
 void SenderPage::OnAutoIP() {
@@ -343,7 +378,7 @@ void SenderPage::OnAutoIP() {
         if (mw) mw->LogMessage(msg);
         SetDlgItemTextW(m_hParent, IDC_DISCOVERY_STATUS, msg.c_str());
         StartDiscovery();
-        AdvanceToStep(STEP_PAIR);
+        AdvanceToStep(STEP_NET);
     } else {
         MessageBoxW(m_hMainWnd, L"IP \u8bbe\u7f6e\u5931\u8d25\u3002\u8bf7\u786e\u4fdd\u4ee5\u7ba1\u7406\u5458\u8fd0\u884c\uff0c\u5e76\u9009\u62e9\u6b63\u786e\u7684\u7f51\u5361", L"\u9519\u8bef", MB_OK | MB_ICONERROR);
     }
@@ -354,11 +389,13 @@ void SenderPage::OnSetIP() {
     GetDlgItemTextW(m_hParent, IDC_EDIT_PEER_IP, buf, 64);
     m_peerIP = buf;
     if (!m_peerIP.empty()) {
+        m_sessionToken.clear();
         std::wstring status = L"\u5df2\u8bbe\u7f6e\u5bf9\u65b9 IP: " + m_peerIP;
         SetDlgItemTextW(m_hParent, IDC_DISCOVERY_STATUS, status.c_str());
         MainWindow* mw = (MainWindow*)GetWindowLongPtrW(m_hMainWnd, GWLP_USERDATA);
         if (mw) mw->LogMessage(L"\u624b\u52a8\u8bbe\u7f6e\u76ee\u6807 IP: " + m_peerIP);
-        AdvanceToStep(STEP_PAIR);
+        StartDiscovery(m_peerIP);
+        AdvanceToStep(STEP_GO);
     }
 }
 

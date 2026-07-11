@@ -190,6 +190,11 @@ std::string ComputeSHA256(const std::wstring& filePath) {
 }
 
 std::string ComputeSHA256(const std::wstring& filePath, int64_t maxBytes) {
+    return ComputeSHA256(filePath, maxBytes, {});
+}
+
+std::string ComputeSHA256(const std::wstring& filePath, int64_t maxBytes,
+    const HashProgressCallback& progressCallback) {
     std::wstring normPath = NormalizePath(filePath);
     HANDLE hFile = CreateFileW(normPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
         NULL, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
@@ -224,6 +229,10 @@ std::string ComputeSHA256(const std::wstring& filePath, int64_t maxBytes) {
             if (bytesRead == 0)
                 break;
             if (BCryptHashData(hHash, buf.data(), bytesRead, 0) < 0) {
+                readOk = false;
+                break;
+            }
+            if (progressCallback && !progressCallback(bytesRead)) {
                 readOk = false;
                 break;
             }

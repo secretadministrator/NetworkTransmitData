@@ -8,6 +8,7 @@ public:
     RoleSelectPage(HWND hParent, const RECT& rc, HWND hMainWnd);
     ~RoleSelectPage();
     bool HandleCommand(int id, HWND hwndCtl, UINT codeNotify) override;
+    void Relayout(const RECT& rc, UINT dpi) override;
 
 private:
     HWND m_hParent;

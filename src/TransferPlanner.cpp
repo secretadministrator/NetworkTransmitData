@@ -8,13 +8,21 @@
 
 namespace fs = std::filesystem;
 
-TransferPlanner::Plan TransferPlanner::BuildPlan(const Manifest& manifest, const std::wstring& targetDir, TransferMode mode) {
+TransferPlanner::Plan TransferPlanner::BuildPlan(const Manifest& manifest,
+    const std::wstring& targetDir, TransferMode mode,
+    const ProgressCallback& progressCallback) {
     Plan plan;
     ResumeManager resumer;
+    Progress progress;
+    progress.totalFiles = manifest.GetEntries().size();
+    progress.stage = L"正在检查目标文件";
 
     bool overwrite = (mode == TransferMode::OVERWRITE || mode == TransferMode::MIRROR);
 
     for (const auto& entry : manifest.GetEntries()) {
+        progress.currentPath = entry.relativePath;
+        if (progressCallback && !progressCallback(progress))
+            return {};
         std::wstring targetPath = targetDir + L"\\" + entry.relativePath;
         std::error_code ec;
         bool exists = fs::exists(targetPath, ec);
@@ -29,7 +37,12 @@ TransferPlanner::Plan TransferPlanner::BuildPlan(const Manifest& manifest, const
         if (pe.offset < 0 || pe.offset > entry.size)
             pe.offset = 0;
         if (pe.offset > 0) {
-            pe.resumeHash = utils::ComputeSHA256(partPath, pe.offset);
+            progress.stage = L"正在校验续传文件";
+            pe.resumeHash = utils::ComputeSHA256(partPath, pe.offset,
+                [&](int64_t bytes) {
+                    progress.hashedBytes += bytes;
+                    return !progressCallback || progressCallback(progress);
+                });
             if (pe.resumeHash.empty()) {
                 pe.offset = 0;
             }
@@ -52,13 +65,19 @@ TransferPlanner::Plan TransferPlanner::BuildPlan(const Manifest& manifest, const
         } else {
             auto existingSize = fs::file_size(targetPath, ec);
             if (!ec && existingSize == entry.size) {
-                pe.resumeHash = utils::ComputeSHA256(targetPath);
-                if (!pe.resumeHash.empty()) {
+                progress.stage = L"正在校验已有文件";
+                pe.resumeHash = utils::ComputeSHA256(targetPath, -1,
+                    [&](int64_t bytes) {
+                        progress.hashedBytes += bytes;
+                        return !progressCallback || progressCallback(progress);
+                    });
+                if (!entry.sha256.empty() && pe.resumeHash == entry.sha256) {
                     pe.action = FileAction::SKIP;
                     pe.offset = 0;
                     plan.skipFiles++;
                 } else {
                     pe.action = FileAction::TRANSFER;
+                    pe.resumeHash.clear();
                     addTransfer();
                 }
             } else {
@@ -68,19 +87,34 @@ TransferPlanner::Plan TransferPlanner::BuildPlan(const Manifest& manifest, const
         }
 
         plan.entries.push_back(pe);
+        ++progress.processedFiles;
+        progress.stage = L"正在检查目标文件";
+        if (progressCallback && !progressCallback(progress))
+            return {};
     }
 
     return plan;
 }
 
-std::vector<std::wstring> TransferPlanner::FindExtraFiles(const Manifest& manifest, const std::wstring& targetDir) {
+std::vector<std::wstring> TransferPlanner::FindExtraFiles(const Manifest& manifest,
+    const std::wstring& targetDir, const ProgressCallback& progressCallback) {
     std::unordered_set<std::wstring> expected;
     for (const auto& e : manifest.GetEntries()) {
         expected.insert(targetDir + L"\\" + e.relativePath);
     }
 
     std::vector<std::wstring> result;
+    Progress progress;
+    progress.totalFiles = 0;
+    progress.stage = L"正在扫描镜像目录";
+    bool cancelled = false;
     std::function<void(const std::wstring&)> scan = [&](const std::wstring& dir) {
+        if (cancelled) return;
+        progress.currentPath = dir;
+        if (progressCallback && !progressCallback(progress)) {
+            cancelled = true;
+            return;
+        }
         WIN32_FIND_DATAW ffd = {};
         std::wstring pattern = dir + L"\\*";
         HANDLE hFind = FindFirstFileW(pattern.c_str(), &ffd);
@@ -92,11 +126,13 @@ std::vector<std::wstring> TransferPlanner::FindExtraFiles(const Manifest& manife
             std::wstring full = dir + L"\\" + name;
 
             if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-                scan(full);
+                if (!(ffd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+                    scan(full);
             } else {
                 if (expected.find(full) == expected.end()) {
                     result.push_back(full);
                 }
+                ++progress.processedFiles;
             }
         } while (FindNextFileW(hFind, &ffd));
         FindClose(hFind);

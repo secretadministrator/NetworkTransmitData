@@ -8,6 +8,7 @@
 #include "IPage.h"
 
 struct TransferResult;
+struct TransferStats;
 
 enum class AppPage {
     ROLE_SELECT,
@@ -29,14 +30,14 @@ public:
     HWND GetHWND() const { return m_hwnd; }
     HINSTANCE GetInstance() const { return m_hInst; }
     AppPage GetCurrentPage() const { return m_currentPage; }
-    void OnTransferProgress(int64_t transferred, int64_t total, int64_t speed, const std::wstring& currentFile);
+    void OnTransferProgress(const TransferStats& stats);
 
     HWND GetLogList() const { return m_hLogList; }
     HWND GetProgressBar() const { return m_hProgressBar; }
     HWND GetProgressText() const { return m_hProgressText; }
 
     HFONT GetUIFont() const { return m_hSimSunFont; }
-    HFONT GetCodeFont() const { return m_hCodeFont; }
+    UINT GetDpi() const { return m_dpi; }
     int GetSenderStep() const { return m_senderStep; }
     int GetReceiverStep() const { return m_receiverStep; }
 
@@ -54,20 +55,22 @@ private:
     HWND m_hReconnectButton = nullptr;
 
     HFONT m_hSimSunFont = nullptr;
-    HFONT m_hCodeFont = nullptr;
     HBRUSH m_hDarkBgBrush = nullptr;
     HBRUSH m_hDarkEditBrush = nullptr;
     int m_senderStep = 0;
     int m_receiverStep = 0;
+    UINT m_dpi = 96;
 
     std::wstring m_lastSourceDirectory;
     std::wstring m_lastPeerIp;
     int m_lastPort = 49321;
-    std::wstring m_lastPairingCode;
 
     void RegisterWindowClass();
     LRESULT WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
     void CreateLayout();
+    void LayoutChildren();
+    void UpdateFonts(UINT dpi);
+    int Dip(int value) const { return MulDiv(value, static_cast<int>(m_dpi), 96); }
     void DestroyPageContent();
     void DrawButton(DRAWITEMSTRUCT* dis);
 

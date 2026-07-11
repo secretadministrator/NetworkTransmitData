@@ -6,13 +6,16 @@
 #include "TransferSession.h"
 #include "Utils.h"
 #include "AuditLogger.h"
+#include "Version.h"
 #include <vector>
+#include <algorithm>
+#include <climits>
 
-static constexpr int WINDOW_WIDTH = 700;
-static constexpr int WINDOW_HEIGHT = 500;
-static constexpr int LOG_HEIGHT = 104;
-static constexpr int STATUS_HEIGHT = 20;
-static constexpr int PAGE_TOP = 4;
+static constexpr int WINDOW_WIDTH = 820;
+static constexpr int WINDOW_HEIGHT = 640;
+static constexpr int LOG_HEIGHT = 120;
+static constexpr int STATUS_HEIGHT = 24;
+static constexpr int PAGE_TOP = 8;
 
 static constexpr COLORREF COL_TEXT = RGB(51, 51, 51);
 static constexpr COLORREF COL_TEXT_DIM = RGB(153, 153, 153);
@@ -23,27 +26,25 @@ static constexpr COLORREF COL_ACCENT_DIM = RGB(0, 80, 160);
 static constexpr COLORREF COL_STEP_DONE = RGB(0, 170, 0);
 static constexpr COLORREF COL_STEP_PENDING = RGB(220, 40, 40);
 
-static HFONT CreateSimSun(int pointSize) {
-    HDC hdc = GetDC(NULL);
-    int height = -MulDiv(pointSize, GetDeviceCaps(hdc, LOGPIXELSY), 72);
-    ReleaseDC(NULL, hdc);
-    return CreateFontW(height, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+static HFONT CreateUIFont(int pointSize, UINT dpi, int weight = FW_NORMAL) {
+    int height = -MulDiv(pointSize, static_cast<int>(dpi), 72);
+    return CreateFontW(height, 0, 0, 0, weight, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"SimSun");
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
 }
 
-static HFONT CreateConsolas(int pointSize) {
-    HDC hdc = GetDC(NULL);
-    int height = -MulDiv(pointSize, GetDeviceCaps(hdc, LOGPIXELSY), 72);
-    ReleaseDC(NULL, hdc);
-    return CreateFontW(height, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Consolas");
+static UINT QueryWindowDpi(HWND hwnd) {
+    using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
+    static auto fn = reinterpret_cast<GetDpiForWindowFn>(
+        GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow"));
+    if (fn && hwnd) return fn(hwnd);
+    HDC hdc = GetDC(hwnd);
+    UINT dpi = hdc ? static_cast<UINT>(GetDeviceCaps(hdc, LOGPIXELSX)) : 96;
+    if (hdc) ReleaseDC(hwnd, hdc);
+    return dpi ? dpi : 96;
 }
 
 MainWindow::MainWindow() {
-    m_hSimSunFont = CreateSimSun(10);
-    m_hCodeFont = CreateConsolas(22);
     m_hDarkBgBrush = CreateSolidBrush(COL_WHITE);
     m_hDarkEditBrush = CreateSolidBrush(COL_WHITE);
 }
@@ -51,7 +52,6 @@ MainWindow::MainWindow() {
 MainWindow::~MainWindow() {
     delete m_currentPageObj;
     if (m_hSimSunFont) DeleteObject(m_hSimSunFont);
-    if (m_hCodeFont) DeleteObject(m_hCodeFont);
     if (m_hDarkBgBrush) DeleteObject(m_hDarkBgBrush);
     if (m_hDarkEditBrush) DeleteObject(m_hDarkEditBrush);
 }
@@ -73,16 +73,23 @@ bool MainWindow::Create(HINSTANCE hInst, int nCmdShow) {
 
     RECT desk;
     GetWindowRect(GetDesktopWindow(), &desk);
-    int x = (desk.right - WINDOW_WIDTH) / 2;
-    int y = (desk.bottom - WINDOW_HEIGHT) / 2;
+    UINT initialDpi = QueryWindowDpi(nullptr);
+    int windowWidth = MulDiv(WINDOW_WIDTH, initialDpi, 96);
+    int windowHeight = MulDiv(WINDOW_HEIGHT, initialDpi, 96);
+    int x = (desk.right - windowWidth) / 2;
+    int y = (desk.bottom - windowHeight) / 2;
 
-    m_hwnd = CreateWindowExW(0, L"DirectTransferMain", L"DirectTransfer - \u76f4\u8fde\u4f20\u8f93\u5de5\u5177",
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-        x, y, WINDOW_WIDTH, WINDOW_HEIGHT,
+    std::wstring title = L"DirectTransfer " + std::wstring(version::APP_VERSION)
+        + L" - \u76f4\u8fde\u4f20\u8f93\u5de5\u5177";
+    m_hwnd = CreateWindowExW(0, L"DirectTransferMain", title.c_str(),
+        WS_OVERLAPPEDWINDOW,
+        x, y, windowWidth, windowHeight,
         NULL, NULL, m_hInst, this);
 
     if (!m_hwnd) return false;
 
+    m_dpi = QueryWindowDpi(m_hwnd);
+    UpdateFonts(m_dpi);
     CreateLayout();
     ShowWindow(m_hwnd, nCmdShow);
     UpdateWindow(m_hwnd);
@@ -95,11 +102,11 @@ void MainWindow::CreateLayout() {
     RECT client;
     GetClientRect(m_hwnd, &client);
 
-    int gap = 3;
-    int progBarH = 14;
-    int progTextH = 36;
-    int logH = LOG_HEIGHT;
-    int statusH = STATUS_HEIGHT;
+    int gap = Dip(6);
+    int progBarH = Dip(16);
+    int progTextH = Dip(56);
+    int logH = Dip(LOG_HEIGHT);
+    int statusH = Dip(STATUS_HEIGHT);
 
     int statusY = client.bottom - statusH;
     int logY = statusY - gap - logH;
@@ -110,14 +117,14 @@ void MainWindow::CreateLayout() {
     // Page container
     m_pageContainer = CreateWindowExW(0, L"STATIC", L"",
         WS_CHILD | WS_VISIBLE,
-        0, PAGE_TOP, client.right, pageBottom - PAGE_TOP,
+        0, Dip(PAGE_TOP), client.right, pageBottom - Dip(PAGE_TOP),
         m_hwnd, NULL, m_hInst, NULL);
     SetWindowSubclass(m_pageContainer, MainWindow::PageContainerProc, 0, (DWORD_PTR)m_hwnd);
 
     // Progress bar
     m_hProgressBar = CreateWindowExW(0, PROGRESS_CLASSW, L"",
         WS_CHILD | PBS_SMOOTH,
-        12, progBarY, client.right - 24, progBarH,
+        Dip(16), progBarY, client.right - Dip(32), progBarH,
         m_hwnd, NULL, m_hInst, NULL);
     SendMessageW(m_hProgressBar, PBM_SETBKCOLOR, 0, RGB(230, 230, 230));
     SendMessageW(m_hProgressBar, PBM_SETBARCOLOR, 0, COL_ACCENT);
@@ -125,14 +132,14 @@ void MainWindow::CreateLayout() {
     // Progress text
     m_hProgressText = CreateWindowExW(0, L"STATIC", L"",
         WS_CHILD | SS_LEFT | SS_NOPREFIX,
-        12, progTextY, client.right - 24, progTextH,
+        Dip(16), progTextY, client.right - Dip(32), progTextH,
         m_hwnd, NULL, m_hInst, NULL);
     if (m_hSimSunFont) SendMessageW(m_hProgressText, WM_SETFONT, (WPARAM)m_hSimSunFont, TRUE);
 
     // Log list
     m_hLogList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
-        WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOINTEGRALHEIGHT | LBS_HASSTRINGS,
-        12, logY, client.right - 24, logH,
+        WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | LBS_NOINTEGRALHEIGHT | LBS_HASSTRINGS,
+        Dip(16), logY, client.right - Dip(32), logH,
         m_hwnd, NULL, m_hInst, NULL);
     if (m_hSimSunFont) SendMessageW(m_hLogList, WM_SETFONT, (WPARAM)m_hSimSunFont, TRUE);
 
@@ -141,14 +148,66 @@ void MainWindow::CreateLayout() {
         WS_CHILD | WS_VISIBLE,
         0, statusY, client.right, statusH,
         m_hwnd, NULL, m_hInst, NULL);
+    if (m_hSimSunFont) SendMessageW(m_hStatusBar, WM_SETFONT, (WPARAM)m_hSimSunFont, TRUE);
 
     // Reconnect button (hidden by default)
     m_hReconnectButton = CreateWindowExW(0, L"BUTTON", L"\u91cd\u65b0\u8fde\u63a5\u5e76\u7eed\u4f20",
         WS_CHILD | BS_PUSHBUTTON | BS_OWNERDRAW,
-        client.right / 2 - 80, progBarY - 30, 160, 24,
+        client.right / 2 - Dip(90), progBarY - Dip(36), Dip(180), Dip(30),
         m_hwnd, (HMENU)(INT_PTR)IDC_BTN_RECONNECT, m_hInst, NULL);
     if (m_hSimSunFont) SendMessageW(m_hReconnectButton, WM_SETFONT, (WPARAM)m_hSimSunFont, TRUE);
     ShowWindow(m_hReconnectButton, SW_HIDE);
+    LayoutChildren();
+}
+
+void MainWindow::UpdateFonts(UINT dpi) {
+    HFONT newFont = CreateUIFont(10, dpi);
+    if (!newFont) return;
+    HFONT oldFont = m_hSimSunFont;
+    m_hSimSunFont = newFont;
+    if (m_hwnd) {
+        EnumChildWindows(m_hwnd, [](HWND child, LPARAM font) -> BOOL {
+            SendMessageW(child, WM_SETFONT, static_cast<WPARAM>(font), TRUE);
+            return TRUE;
+        }, reinterpret_cast<LPARAM>(newFont));
+    }
+    if (oldFont) DeleteObject(oldFont);
+}
+
+void MainWindow::LayoutChildren() {
+    if (!m_hwnd || !m_pageContainer) return;
+    RECT client = {};
+    GetClientRect(m_hwnd, &client);
+    int gap = Dip(6);
+    int margin = Dip(16);
+    int statusH = Dip(STATUS_HEIGHT);
+    int logH = Dip(LOG_HEIGHT);
+    int progressTextH = Dip(56);
+    int progressBarH = Dip(16);
+    int statusY = client.bottom - statusH;
+    int logY = statusY - gap - logH;
+    int progressTextY = logY - gap - progressTextH;
+    int progressBarY = progressTextY - gap - progressBarH;
+    int pageTop = Dip(PAGE_TOP);
+    int pageBottom = progressBarY - gap;
+
+    MoveWindow(m_pageContainer, 0, pageTop, client.right,
+        (std::max)(0, pageBottom - pageTop), TRUE);
+    MoveWindow(m_hProgressBar, margin, progressBarY,
+        (std::max)(0, static_cast<int>(client.right) - margin * 2), progressBarH, TRUE);
+    MoveWindow(m_hProgressText, margin, progressTextY,
+        (std::max)(0, static_cast<int>(client.right) - margin * 2), progressTextH, TRUE);
+    MoveWindow(m_hLogList, margin, logY,
+        (std::max)(0, static_cast<int>(client.right) - margin * 2), logH, TRUE);
+    MoveWindow(m_hStatusBar, 0, statusY, client.right, statusH, TRUE);
+    MoveWindow(m_hReconnectButton, client.right / 2 - Dip(90),
+        progressBarY - Dip(36), Dip(180), Dip(30), TRUE);
+
+    if (m_currentPageObj) {
+        RECT page = {};
+        GetClientRect(m_pageContainer, &page);
+        m_currentPageObj->Relayout(page, m_dpi);
+    }
 }
 
 void MainWindow::DestroyPageContent() {
@@ -194,6 +253,7 @@ void MainWindow::SwitchToPage(AppPage page) {
     }
 
     m_currentPageObj = newPage;
+    LayoutChildren();
 }
 
 void MainWindow::RunMessageLoop() {
@@ -208,6 +268,18 @@ void MainWindow::LogMessage(const std::wstring& msg) {
     if (!m_hLogList) return;
     int idx = SendMessageW(m_hLogList, LB_ADDSTRING, 0, (LPARAM)msg.c_str());
     SendMessageW(m_hLogList, LB_SETTOPINDEX, idx, 0);
+    HDC hdc = GetDC(m_hLogList);
+    if (hdc) {
+        HFONT old = (HFONT)SelectObject(hdc, m_hSimSunFont);
+        SIZE size = {};
+        if (GetTextExtentPoint32W(hdc, msg.c_str(), static_cast<int>(msg.size()), &size)) {
+            LRESULT current = SendMessageW(m_hLogList, LB_GETHORIZONTALEXTENT, 0, 0);
+            if (size.cx + Dip(24) > current)
+                SendMessageW(m_hLogList, LB_SETHORIZONTALEXTENT, size.cx + Dip(24), 0);
+        }
+        SelectObject(hdc, old);
+        ReleaseDC(m_hLogList, hdc);
+    }
     AuditLogger::Instance().Write(msg);
 }
 
@@ -216,28 +288,71 @@ void MainWindow::SetStatusText(const std::wstring& text) {
         SetWindowTextW(m_hStatusBar, text.c_str());
 }
 
-void MainWindow::OnTransferProgress(int64_t transferred, int64_t total, int64_t speed, const std::wstring& currentFile) {
-    if (m_hProgressBar && total > 0) {
-        int64_t range = (total + 1023) / 1024;
-        int64_t pos = (transferred + 1023) / 1024;
+void MainWindow::OnTransferProgress(const TransferStats& stats) {
+    if (stats.scanning) {
+        if (m_hProgressBar) {
+            SendMessageW(m_hProgressBar, PBM_SETRANGE32, 0, 100);
+            SendMessageW(m_hProgressBar, PBM_SETPOS, 0, 0);
+        }
+        if (m_hProgressText) {
+            std::wstring text = L"\u6b63\u5728\u626b\u63cf  |  \u6587\u4ef6: " + std::to_wstring(stats.totalFiles)
+                + L"  |  \u76ee\u5f55: " + std::to_wstring(stats.scannedDirectories)
+                + L"  |  \u5df2\u53d1\u73b0: " + utils::FormatBytes(stats.scannedBytes);
+            if (stats.inaccessibleDirectories > 0)
+                text += L"  |  \u65e0\u6cd5\u8bbf\u95ee: " + std::to_wstring(stats.inaccessibleDirectories);
+            if (!stats.currentFile.empty())
+                text += L"\r\n\u5f53\u524d\u76ee\u5f55: " + stats.currentFile;
+            SetWindowTextW(m_hProgressText, text.c_str());
+        }
+        return;
+    }
+
+    if (stats.stage == TransferStage::HashingSource ||
+        stats.stage == TransferStage::WaitingForPlan ||
+        stats.stage == TransferStage::BuildingPlan ||
+        stats.stage == TransferStage::VerifyingPlan) {
+        if (m_hProgressBar) {
+            int total = stats.stageTotal > 0 && stats.stageTotal <= INT_MAX
+                ? static_cast<int>(stats.stageTotal) : 100;
+            int processed = stats.stageTotal > 0 && stats.stageProcessed <= INT_MAX
+                ? static_cast<int>(stats.stageProcessed) : 0;
+            SendMessageW(m_hProgressBar, PBM_SETRANGE32, 0, total);
+            SendMessageW(m_hProgressBar, PBM_SETPOS, processed, 0);
+        }
+        if (m_hProgressText) {
+            std::wstring text = stats.stageText.empty()
+                ? L"\u6b63\u5728\u51c6\u5907\u4f20\u8f93" : stats.stageText;
+            if (stats.stageTotal > 0)
+                text += L"  |  " + std::to_wstring(stats.stageProcessed)
+                    + L" / " + std::to_wstring(stats.stageTotal);
+            if (stats.stageBytes > 0)
+                text += L"  |  \u5df2\u6821\u9a8c " + utils::FormatBytes(stats.stageBytes);
+            if (!stats.currentFile.empty())
+                text += L"\r\n\u5f53\u524d: " + stats.currentFile;
+            SetWindowTextW(m_hProgressText, text.c_str());
+        }
+        return;
+    }
+
+    if (m_hProgressBar && stats.totalBytes > 0) {
+        int64_t range = (stats.totalBytes + 1023) / 1024;
+        int64_t pos = (stats.transferredBytes + 1023) / 1024;
         if (range < 1) range = 1;
         if (pos > range) pos = range;
         SendMessageW(m_hProgressBar, PBM_SETRANGE32, 0, (LPARAM)range);
         SendMessageW(m_hProgressBar, PBM_SETPOS, (WPARAM)pos, 0);
     }
     if (m_hProgressText) {
-        int64_t remainingSeconds = -1;
-        if (total > 0 && transferred >= total) {
-            remainingSeconds = 0;
-        } else if (speed > 0 && total > transferred) {
-            remainingSeconds = (total - transferred + speed - 1) / speed;
-        }
-
-        std::wstring text = utils::FormatBytes(transferred) + L" / " + utils::FormatBytes(total)
-            + L"  |  " + utils::FormatSpeed(speed)
-            + L"  |  \u9884\u8ba1\u5269\u4f59: " + utils::FormatDuration(remainingSeconds);
-        if (!currentFile.empty())
-            text += L"\r\n\u5f53\u524d\u6587\u4ef6: " + currentFile;
+        std::wstring text = utils::FormatBytes(stats.transferredBytes) + L" / "
+            + utils::FormatBytes(stats.totalBytes)
+            + L"  |  \u6700\u8fd1: " + utils::FormatSpeed(stats.recentSpeedBytesPerSec)
+            + L"  |  \u5e73\u5747: " + utils::FormatSpeed(stats.averageSpeedBytesPerSec)
+            + L"  |  \u9884\u8ba1\u5269\u4f59: "
+            + utils::FormatDuration(stats.estimatedRemainingSeconds);
+        if (stats.waitingForIo)
+            text += L"  (\u6b63\u5728\u7b49\u5f85\u78c1\u76d8/\u7f51\u7edc)";
+        if (!stats.currentFile.empty())
+            text += L"\r\n\u5f53\u524d\u6587\u4ef6: " + stats.currentFile;
         SetWindowTextW(m_hProgressText, text.c_str());
     }
 }
@@ -251,7 +366,6 @@ void MainWindow::DrawButton(DRAWITEMSTRUCT* dis) {
         case IDC_BTN_SEND:
         case IDC_BTN_RECV:
         case IDC_BTN_START:
-        case IDC_BTN_CONFIRM_CODE:
             primary = true;
             break;
     }
@@ -304,6 +418,32 @@ LRESULT MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_DESTROY:
             PostQuitMessage(0);
             return 0;
+
+        case WM_SIZE:
+            LayoutChildren();
+            return 0;
+
+        case WM_DPICHANGED: {
+            UINT newDpi = HIWORD(wp);
+            RECT* suggested = reinterpret_cast<RECT*>(lp);
+            m_dpi = newDpi ? newDpi : 96;
+            if (suggested) {
+                SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
+                    suggested->right - suggested->left,
+                    suggested->bottom - suggested->top,
+                    SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            UpdateFonts(m_dpi);
+            LayoutChildren();
+            return 0;
+        }
+
+        case WM_GETMINMAXINFO: {
+            MINMAXINFO* info = reinterpret_cast<MINMAXINFO*>(lp);
+            info->ptMinTrackSize.x = Dip(680);
+            info->ptMinTrackSize.y = Dip(560);
+            return 0;
+        }
 
         case WM_COMMAND: {
             WORD id = LOWORD(wp);
@@ -365,10 +505,7 @@ LRESULT MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 SetTextColor(hdc, dotIdx <= currentStep ? COL_STEP_DONE : COL_STEP_PENDING);
                 return (LRESULT)GetStockObject(NULL_BRUSH);
             }
-            if (ctrlId == IDC_PAIRING_DISPLAY) {
-                SelectObject(hdc, m_hCodeFont);
-                SetTextColor(hdc, COL_ACCENT);
-            } else if (hCtrl == m_hStatusBar) {
+            if (hCtrl == m_hStatusBar) {
                 SelectObject(hdc, m_hSimSunFont);
                 SetTextColor(hdc, COL_TEXT_DIM);
             } else {
@@ -417,8 +554,7 @@ LRESULT MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (s) {
                 ShowWindow(m_hProgressBar, SW_SHOW);
                 ShowWindow(m_hProgressText, SW_SHOW);
-                OnTransferProgress(s->transferredBytes, s->totalBytes,
-                    s->speedBytesPerSec, s->currentFile);
+                OnTransferProgress(*s);
                 delete s;
             }
             return 0;

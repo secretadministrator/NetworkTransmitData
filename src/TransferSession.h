@@ -44,10 +44,28 @@ enum class TransferResultCode {
 
 enum class TransferRole { NONE, SENDER, RECEIVER };
 
+enum class TransferStage {
+    Idle,
+    ScanningSource,
+    HashingSource,
+    WaitingForPlan,
+    BuildingPlan,
+    VerifyingPlan,
+    Transferring
+};
+
 struct TransferStats {
     int64_t totalBytes = 0;
     int64_t transferredBytes = 0;
     int64_t speedBytesPerSec = 0;
+    int64_t recentSpeedBytesPerSec = 0;
+    int64_t averageSpeedBytesPerSec = 0;
+    int64_t estimatedRemainingSeconds = -1;
+    bool waitingForIo = false;
+    bool scanning = false;
+    uint64_t scannedDirectories = 0;
+    uint64_t inaccessibleDirectories = 0;
+    int64_t scannedBytes = 0;
     int totalFiles = 0;
     int completedFiles = 0;
     int skippedFiles = 0;
@@ -55,6 +73,11 @@ struct TransferStats {
     int interruptedFiles = 0;
     bool resumable = false;
     std::wstring currentFile;
+    TransferStage stage = TransferStage::Idle;
+    uint64_t stageProcessed = 0;
+    uint64_t stageTotal = 0;
+    int64_t stageBytes = 0;
+    std::wstring stageText;
 };
 
 struct TransferResult {
@@ -69,7 +92,7 @@ struct TransferResult {
 // ── Receiver connection result ──
 enum class ReceiverConnectionResult {
     Completed,
-    PairingRejected,
+    HandshakeRejected,
     ConnectionLost,
     Cancelled,
     Failed
@@ -81,9 +104,9 @@ public:
     ~TransferSession();
 
     bool StartAsSender(const std::wstring& sourceDir, const std::wstring& peerIP,
-        int port, const std::wstring& pairingCode);
+        int port, const std::wstring& sessionToken);
     bool StartAsReceiver(const std::wstring& targetDir, int port,
-        const std::wstring& expectedPairingCode, TransferMode mode = TransferMode::SAFE_COPY);
+        const std::wstring& sessionToken, TransferMode mode = TransferMode::SAFE_COPY);
     void Stop();
     bool IsRunning() const { return m_running; }
 
@@ -128,18 +151,22 @@ private:
     static constexpr DWORD IO_WAIT_TIMEOUT_MS = 5000;
     static constexpr ULONGLONG CONNECTION_IDLE_MS = 90000;
     static constexpr ULONGLONG HEARTBEAT_INTERVAL_MS = 15000;
+    static constexpr ULONGLONG PROGRESS_REPORT_INTERVAL_MS = 100;
     static constexpr int MAX_TIMEOUT_RETRIES = 18;
+    static constexpr DWORD PLAN_PROGRESS_TIMEOUT_MS = 90000;
+
+    std::atomic<ULONGLONG> m_lastProgressReportTick{0};
 
     void SenderWorker(const std::wstring& sourceDir, const std::wstring& peerIP,
-        int port, const std::wstring& pairingCode);
+        int port, const std::wstring& sessionToken);
     TransferResult InnerSenderWorker(const std::wstring& sourceDir, const std::wstring& peerIP,
-        int port, const std::wstring& pairingCode);
+        int port, const std::wstring& sessionToken);
     void ReceiverWorker(const std::wstring& targetDir, int port,
-        const std::wstring& expectedPairingCode, TransferMode mode);
+        const std::wstring& sessionToken, TransferMode mode);
     void InnerReceiverWorker(const std::wstring& targetDir, int port,
-        const std::wstring& expectedPairingCode, TransferMode mode);
+        const std::wstring& sessionToken, TransferMode mode);
     ReceiverConnectionResult HandleReceiverConnection(SOCKET sock, const std::wstring& targetDir,
-        const std::wstring& expectedPairingCode, TransferMode mode);
+        const std::wstring& sessionToken, TransferMode mode);
 
     // ── Legacy boolean wrappers (preserved for compatibility) ──
     bool SendPacket(SOCKET sock, uint8_t type, const std::vector<uint8_t>& payload);
@@ -154,7 +181,8 @@ private:
     IoResult SendPacketResult(SOCKET sock, uint8_t type,
         const uint8_t* payload, size_t payloadSize);
     IoResult RecvRawPacket(SOCKET sock, uint8_t& type, std::vector<uint8_t>& payload);
-    IoResult RecvPacketResult(SOCKET sock, uint8_t& type, std::vector<uint8_t>& payload);
+    IoResult RecvPacketResult(SOCKET sock, uint8_t& type,
+        std::vector<uint8_t>& payload, DWORD businessTimeoutMs = INFINITE);
 
     // ── Heartbeat ──
     void StartHeartbeat(SOCKET sock);
@@ -179,7 +207,11 @@ private:
     std::mutex m_packetQueueMutex;
     std::condition_variable m_packetQueueCv;
     std::deque<ReceivedPacket> m_packetQueue;
+    size_t m_packetQueueBytes = 0;
     std::atomic<bool> m_receiveLoopRunning{false};
+
+    static constexpr size_t MAX_PACKET_QUEUE_BYTES = 8 * 1024 * 1024;
+    static constexpr size_t MAX_PACKET_QUEUE_COUNT = 64;
 
     void StartReceiveLoop(SOCKET sock);
     void StopReceiveLoop();
@@ -197,5 +229,5 @@ private:
     // ── Helpers ──
     void NotifyDone(TransferResultCode code, const std::wstring& message);
     void Log(const std::wstring& msg);
-    void ReportProgress();
+    void ReportProgress(bool force = false);
 };

@@ -6,6 +6,7 @@
 #include "IpConfigurator.h"
 #include "Utils.h"
 #include "AuditLogger.h"
+#include <algorithm>
 
 static const int STEP_IDS[3][7] = {
     { IDC_EDIT_DST_DIR, IDC_BTN_BROWSE, 0 },
@@ -70,8 +71,6 @@ void ReceiverPage::AdvanceToStep(int step) {
         EnableGroup(i, i <= step);
     MainWindow* mw = (MainWindow*)GetWindowLongPtrW(m_hMainWnd, GWLP_USERDATA);
     if (mw) PostMessageW(m_hMainWnd, WM_STEP_CHANGED, (WPARAM)step, (LPARAM)1);
-    if (step >= STEP_GO && !m_targetDir.empty())
-        StartListener();
 }
 
 void ReceiverPage::EnableGroup(int group, bool enable) {
@@ -84,10 +83,7 @@ void ReceiverPage::EnableGroup(int group, bool enable) {
 void ReceiverPage::CreateControls(const RECT& rc) {
     MainWindow* mw = (MainWindow*)GetWindowLongPtrW(m_hMainWnd, GWLP_USERDATA);
     HFONT hFont = mw ? mw->GetUIFont() : NULL;
-    HFONT hCodeFont = mw ? mw->GetCodeFont() : NULL;
-
-    std::wstring code = m_pairing.GenerateCode();
-    m_pairingCode = code;
+    m_sessionToken = m_pairing.GenerateToken();
 
     int cx = rc.right - rc.left;
     int x = 14;
@@ -118,10 +114,12 @@ void ReceiverPage::CreateControls(const RECT& rc) {
         return h;
     };
 
+    int nextLabelId = 620;
     auto MakeLabel = [&](const wchar_t* text, int lx, int ly, int lw) {
         HWND h = CreateWindowExW(0, L"STATIC", text,
             WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
-            lx, ly + 2, lw, rowH - 2, m_hParent, NULL, m_hInst, NULL);
+            lx, ly + 2, lw, rowH - 2, m_hParent,
+            (HMENU)(INT_PTR)nextLabelId++, m_hInst, NULL);
         if (hFont) SendMessageW(h, WM_SETFONT, (WPARAM)hFont, TRUE);
         return h;
     };
@@ -147,19 +145,10 @@ void ReceiverPage::CreateControls(const RECT& rc) {
     MakeBtn(IDC_BTN_BROWSE, L"\u6d4f\u89c8", xLabel + labelW + editW + gap2, y, browseW, false);
     y += rowH + rowGap;
 
-    // Pairing code (always visible)
-    MakeLabel(L"\u914d\u5bf9\u7801:", xLabel, y, labelW);
-    HWND hPairing = CreateWindowExW(0, L"STATIC", code.c_str(),
-        WS_CHILD | WS_VISIBLE | SS_CENTER | SS_CENTERIMAGE,
-        xLabel + labelW, y, 120, rowH + 4, m_hParent, (HMENU)IDC_PAIRING_DISPLAY, m_hInst, NULL);
-    if (hCodeFont) SendMessageW(hPairing, WM_SETFONT, (WPARAM)hCodeFont, TRUE);
-    MakeLabel(L"\u8bf7\u5728\u53d1\u9001\u7aef\u8f93\u5165\u6b64\u7801", xLabel + labelW + 126, y + 2, 200);
-    y += rowH + rowGap + 6;
-
     // Status (always visible)
     MakeLabel(L"\u72b6\u6001:", xLabel, y, 32);
     CreateWindowExW(0, L"STATIC", L"\u8bf7\u5148\u9009\u62e9\u76ee\u6807\u76ee\u5f55",
-        WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
+        WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP | SS_ENDELLIPSIS | SS_NOPREFIX,
         xLabel + 34, y + 2, ctrlW - (xLabel - x) - 34, rowH - 2,
         m_hParent, (HMENU)IDC_DISCOVERY_STATUS, m_hInst, NULL);
     if (hFont) SendMessageW(GetDlgItem(m_hParent, IDC_DISCOVERY_STATUS), WM_SETFONT, (WPARAM)hFont, TRUE);
@@ -209,12 +198,66 @@ void ReceiverPage::CreateControls(const RECT& rc) {
 
     MakeBtn(IDC_BTN_START, L"\u5f00\u59cb\u63a5\u6536", cx / 2 - 65, y, 130, true);
 
-    AuditLogger::Instance().Write(L"\u63a5\u6536\u9875\u521b\u5efa\u5b8c\u6210\uff0c\u914d\u5bf9\u7801: " + code);
+    AuditLogger::Instance().Write(
+        L"\u63a5\u6536\u9875\u521b\u5efa\u5b8c\u6210\uff0c\u5df2\u521b\u5efa\u81ea\u52a8\u8bc6\u522b\u4f1a\u8bdd");
+    Relayout(rc, mw ? mw->GetDpi() : 96);
+}
+
+void ReceiverPage::Relayout(const RECT& rc, UINT dpi) {
+    auto dip = [dpi](int value) { return MulDiv(value, static_cast<int>(dpi), 96); };
+    auto move = [&](int id, int x, int y, int w, int h) {
+        HWND control = GetDlgItem(m_hParent, id);
+        if (control) MoveWindow(control, x, y, (std::max)(0, w), h, TRUE);
+    };
+    const int width = rc.right - rc.left;
+    const int margin = dip(20), dotW = dip(16), labelW = dip(88);
+    const int rowH = dip(30), gap = dip(8);
+    const int xLabel = margin + dotW + dip(6);
+    const int contentRight = width - margin;
+    int y = dip(12);
+
+    move(IDC_BTN_BACK, margin, y, dip(76), rowH);
+    y += rowH + gap;
+    move(IDC_STEP_DOT_1, margin, y + dip(7), dotW, dip(16));
+    move(620, xLabel, y, labelW, rowH);
+    int browseW = dip(68);
+    move(IDC_EDIT_DST_DIR, xLabel + labelW, y,
+        contentRight - (xLabel + labelW) - browseW - gap, rowH);
+    move(IDC_BTN_BROWSE, contentRight - browseW, y, browseW, rowH);
+    y += rowH + gap;
+
+    move(621, xLabel, y, dip(52), rowH);
+    move(IDC_DISCOVERY_STATUS, xLabel + dip(56), y,
+        contentRight - xLabel - dip(56), rowH);
+    y += rowH + gap;
+
+    move(IDC_STEP_DOT_2, margin, y + dip(7), dotW, dip(16));
+    move(622, xLabel, y, labelW, rowH);
+    int restoreW = dip(68), configW = dip(76);
+    move(IDC_COMBO_NIC, xLabel + labelW, y,
+        contentRight - (xLabel + labelW) - restoreW - configW - gap * 2, rowH);
+    move(IDC_BTN_AUTO_IP, contentRight - restoreW - configW - gap, y, configW, rowH);
+    move(IDC_BTN_RESTORE_IP, contentRight - restoreW, y, restoreW, rowH);
+    y += rowH + gap;
+
+    move(623, xLabel, y, labelW, rowH);
+    move(IDC_EDIT_CUSTOM_IP, xLabel + labelW, y, dip(160), rowH);
+    move(624, xLabel + labelW + dip(168), y, dip(52), rowH);
+    move(IDC_EDIT_CUSTOM_MASK, xLabel + labelW + dip(224), y,
+        (std::max)(dip(120), contentRight - (xLabel + labelW + dip(224))), rowH);
+    y += rowH + gap;
+
+    move(IDC_STEP_DOT_3, margin, y + dip(7), dotW, dip(16));
+    move(625, xLabel, y, labelW, rowH);
+    move(IDC_COMBO_MODE, xLabel + labelW, y,
+        contentRight - (xLabel + labelW), dip(180));
+    y += rowH + dip(12);
+    move(IDC_BTN_START, width / 2 - dip(85), y, dip(170), dip(38));
 }
 
 void ReceiverPage::StartListener() {
     int port = AppConfig::Instance().port;
-    m_discovery.StartReceiverListener(m_hMainWnd, port);
+    m_discovery.StartReceiverListener(m_hMainWnd, port, m_sessionToken);
 }
 
 void ReceiverPage::OnBrowse() {
@@ -267,12 +310,13 @@ void ReceiverPage::OnStartListening() {
             PostMessageW(mw->GetHWND(), WM_TRANSFER_DONE, (WPARAM)copy, 0);
         }
     });
-    if (!m_session.StartAsReceiver(m_targetDir, port, m_pairingCode, mode)) {
+    if (!m_session.StartAsReceiver(m_targetDir, port, m_sessionToken, mode)) {
         SetDlgItemTextW(m_hParent, IDC_DISCOVERY_STATUS, L"\u542f\u52a8\u63a5\u6536\u5931\u8d25");
         MessageBoxW(m_hMainWnd, L"\u542f\u52a8\u63a5\u6536\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5",
             L"\u9519\u8bef", MB_OK | MB_ICONERROR);
         return;
     }
+    StartListener();
     SetDlgItemTextW(m_hParent, IDC_DISCOVERY_STATUS, L"\u6b63\u5728\u7b49\u5f85\u53d1\u9001\u7aef\u8fde\u63a5...");
 }
 

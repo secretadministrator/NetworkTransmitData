@@ -13,16 +13,17 @@ public:
     ~SenderPage();
     bool HandleCommand(int id, HWND hwndCtl, UINT codeNotify) override;
     bool HandleMessage(UINT msg, WPARAM wp, LPARAM lp) override;
+    void Relayout(const RECT& rc, UINT dpi) override;
 
 private:
-    enum { STEP_DIR = 0, STEP_NET, STEP_PAIR, STEP_GO, STEP_MAX };
+    enum { STEP_DIR = 0, STEP_NET, STEP_GO, STEP_MAX };
 
     HINSTANCE m_hInst;
     HWND m_hParent;
     HWND m_hMainWnd;
     std::wstring m_sourceDir;
     std::wstring m_peerIP;
-    std::wstring m_pairingCode;
+    std::wstring m_sessionToken;
     int m_currentStep = 0;
 
     NetworkDiscovery m_discovery;
@@ -33,10 +34,9 @@ private:
     void EnableGroup(int group, bool enable);
     void OnBrowse();
     void OnStartTransfer();
-    void OnConfirmCode();
     void OnAutoIP();
     void OnRestoreIP();
     void OnSetIP();
     void OnBack();
-    void StartDiscovery();
+    void StartDiscovery(const std::wstring& directIP = L"");
 };

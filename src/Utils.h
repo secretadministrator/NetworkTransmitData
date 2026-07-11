@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <string>
 #include <cstdint>
+#include <functional>
 
 namespace utils {
 
@@ -20,6 +21,9 @@ std::wstring NormalizePath(const std::wstring& path);
 bool CreateDirectoryTree(const std::wstring& path);
 std::string ComputeSHA256(const std::wstring& filePath);
 std::string ComputeSHA256(const std::wstring& filePath, int64_t maxBytes);
+using HashProgressCallback = std::function<bool(int64_t)>;
+std::string ComputeSHA256(const std::wstring& filePath, int64_t maxBytes,
+    const HashProgressCallback& progressCallback);
 std::string BytesToHex(const uint8_t* data, size_t len);
 
 } // namespace utils

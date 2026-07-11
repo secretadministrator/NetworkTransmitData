@@ -1,23 +1,29 @@
 #include "PairingHandler.h"
-#include <random>
+#include <windows.h>
+#include <bcrypt.h>
+#include <cstdint>
 
 PairingHandler::PairingHandler() {
-    GenerateCode();
+    GenerateToken();
 }
 
-std::wstring PairingHandler::GenerateCode() {
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<> dist(0, 9);
+std::wstring PairingHandler::GenerateToken() {
+    uint8_t bytes[16] = {};
+    if (BCryptGenRandom(nullptr, bytes, sizeof(bytes),
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0) {
+        m_expectedToken.clear();
+        return {};
+    }
 
-    wchar_t code[7] = {};
-    for (int i = 0; i < 6; ++i)
-        code[i] = L'0' + dist(gen);
-    code[6] = L'\0';
-    m_expectedCode = code;
-    return m_expectedCode;
+    static constexpr wchar_t HEX[] = L"0123456789abcdef";
+    m_expectedToken.resize(sizeof(bytes) * 2);
+    for (size_t i = 0; i < sizeof(bytes); ++i) {
+        m_expectedToken[i * 2] = HEX[bytes[i] >> 4];
+        m_expectedToken[i * 2 + 1] = HEX[bytes[i] & 0x0F];
+    }
+    return m_expectedToken;
 }
 
 bool PairingHandler::Verify(const std::wstring& input) const {
-    return input == m_expectedCode;
+    return !m_expectedToken.empty() && input == m_expectedToken;
 }
