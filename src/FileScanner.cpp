@@ -1,7 +1,13 @@
 #include "FileScanner.h"
-#include <filesystem>
+#include "Utils.h"
 
-namespace fs = std::filesystem;
+static std::wstring FileTimeToStableString(const FILETIME& ft) {
+    uint64_t value = (static_cast<uint64_t>(ft.dwHighDateTime) << 32) |
+        static_cast<uint64_t>(ft.dwLowDateTime);
+    wchar_t buf[32] = {};
+    swprintf(buf, 32, L"%016llx", value);
+    return buf;
+}
 
 std::vector<FileEntry> FileScanner::ScanDirectory(const std::wstring& rootDir) {
     std::vector<FileEntry> results;
@@ -9,10 +15,10 @@ std::vector<FileEntry> FileScanner::ScanDirectory(const std::wstring& rootDir) {
     m_progress.currentPath = rootDir;
     m_lastProgressTime = std::chrono::steady_clock::now();
 
-    std::error_code ec;
-    if (!fs::exists(rootDir, ec) || ec) {
-        if (ec)
-            m_progress.inaccessibleDirectories++;
+    const DWORD attributes = GetFileAttributesW(utils::NormalizePath(rootDir).c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES ||
+        (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        m_progress.inaccessibleDirectories++;
         ReportProgress(true);
         return results;
     }
@@ -46,48 +52,60 @@ void FileScanner::ScanRecursive(const std::wstring& rootDir, const std::wstring&
     m_progress.currentPath = currentPath;
     ReportProgress();
 
-    std::error_code ec;
-    fs::directory_iterator it(currentPath, fs::directory_options::none, ec);
-    if (ec) {
+    const std::wstring pattern = utils::NormalizePath(currentPath + L"\\*");
+    WIN32_FIND_DATAW data{};
+    HANDLE find = FindFirstFileExW(pattern.c_str(), FindExInfoBasic, &data,
+        FindExSearchNameMatch, nullptr, FIND_FIRST_EX_LARGE_FETCH);
+    if (find == INVALID_HANDLE_VALUE && GetLastError() == ERROR_INVALID_PARAMETER) {
+        find = FindFirstFileExW(pattern.c_str(), FindExInfoBasic, &data,
+            FindExSearchNameMatch, nullptr, 0);
+    }
+    if (find == INVALID_HANDLE_VALUE) {
         m_progress.inaccessibleDirectories++;
         ReportProgress(true);
         return;
     }
 
-    const fs::directory_iterator end;
-    while (it != end) {
-        const auto entry = *it;
-        m_progress.currentPath = currentPath;
-        std::wstring fullPath = entry.path().wstring();
-
-        if (!m_excludeCb || !m_excludeCb(fullPath)) {
-            std::error_code typeEc;
-            if (entry.is_directory(typeEc)) {
+    do {
+        const std::wstring name = data.cFileName;
+        if (name == L"." || name == L"..")
+            continue;
+        const std::wstring fullPath = currentPath + L"\\" + name;
+        if (m_excludeCb && m_excludeCb(fullPath))
+            continue;
+        if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+            if ((data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0)
                 ScanRecursive(rootDir, fullPath, results);
-            } else if (!typeEc && entry.is_regular_file(typeEc)) {
-                std::error_code sizeEc;
-                const auto fileSize = entry.file_size(sizeEc);
-                if (!sizeEc) {
-                    FileEntry fe;
-                    fe.relativePath = fullPath.substr(rootDir.length());
-                    if (!fe.relativePath.empty() && fe.relativePath[0] == L'\\')
-                        fe.relativePath = fe.relativePath.substr(1);
-                    fe.size = static_cast<int64_t>(fileSize);
-                    fe.attributes = FILE_ATTRIBUTE_NORMAL;
-                    results.push_back(fe);
-
-                    m_progress.scannedFiles++;
-                    m_progress.scannedBytes += fileSize;
-                    ReportProgress();
-                }
-            }
+            continue;
         }
+        if ((data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+            continue;
 
-        it.increment(ec);
-        if (ec) {
-            m_progress.inaccessibleDirectories++;
-            ReportProgress(true);
-            break;
+        ULARGE_INTEGER size{};
+        size.LowPart = data.nFileSizeLow;
+        size.HighPart = data.nFileSizeHigh;
+        if (size.QuadPart > static_cast<uint64_t>(INT64_MAX))
+            continue;
+
+        FileEntry entry;
+        entry.relativePath = fullPath.substr(rootDir.length());
+        while (!entry.relativePath.empty() &&
+            (entry.relativePath.front() == L'\\' || entry.relativePath.front() == L'/')) {
+            entry.relativePath.erase(entry.relativePath.begin());
         }
+        entry.size = static_cast<int64_t>(size.QuadPart);
+        entry.attributes = data.dwFileAttributes;
+        entry.lastWriteTime = FileTimeToStableString(data.ftLastWriteTime);
+        results.push_back(std::move(entry));
+        ++m_progress.scannedFiles;
+        m_progress.scannedBytes += size.QuadPart;
+        ReportProgress();
+    } while (FindNextFileW(find, &data));
+
+    const DWORD error = GetLastError();
+    FindClose(find);
+    if (error != ERROR_NO_MORE_FILES) {
+        ++m_progress.inaccessibleDirectories;
+        ReportProgress(true);
     }
 }

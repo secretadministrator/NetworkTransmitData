@@ -307,6 +307,26 @@ void MainWindow::OnTransferProgress(const TransferStats& stats) {
         return;
     }
 
+    if (stats.stage == TransferStage::Reconnecting) {
+        if (m_hProgressBar) {
+            SendMessageW(m_hProgressBar, PBM_SETRANGE32, 0, 10000);
+            int position = 0;
+            if (stats.overallWorkTotal > 0) {
+                position = static_cast<int>((static_cast<long double>(stats.overallWorkCompleted)
+                    * 10000.0L) / static_cast<long double>(stats.overallWorkTotal));
+            }
+            SendMessageW(m_hProgressBar, PBM_SETPOS, position, 0);
+        }
+        if (m_hProgressText) {
+            std::wstring text = L"连接中断，正在自动重连  |  已重试: "
+                + std::to_wstring(stats.retryCount) + L" 次  |  已提交文件: "
+                + std::to_wstring(stats.completedFiles) + L" / "
+                + std::to_wstring(stats.totalFiles);
+            SetWindowTextW(m_hProgressText, text.c_str());
+        }
+        return;
+    }
+
     if (stats.stage == TransferStage::HashingSource ||
         stats.stage == TransferStage::WaitingForPlan ||
         stats.stage == TransferStage::BuildingPlan ||
@@ -334,25 +354,39 @@ void MainWindow::OnTransferProgress(const TransferStats& stats) {
         return;
     }
 
-    if (m_hProgressBar && stats.totalBytes > 0) {
-        int64_t range = (stats.totalBytes + 1023) / 1024;
-        int64_t pos = (stats.transferredBytes + 1023) / 1024;
-        if (range < 1) range = 1;
-        if (pos > range) pos = range;
-        SendMessageW(m_hProgressBar, PBM_SETRANGE32, 0, (LPARAM)range);
-        SendMessageW(m_hProgressBar, PBM_SETPOS, (WPARAM)pos, 0);
+    if (m_hProgressBar) {
+        SendMessageW(m_hProgressBar, PBM_SETRANGE32, 0, 10000);
+        int position = 0;
+        if (stats.overallWorkTotal > 0) {
+            long double percent = static_cast<long double>(stats.overallWorkCompleted)
+                / static_cast<long double>(stats.overallWorkTotal);
+            if (percent < 0.0L) percent = 0.0L;
+            if (percent > 1.0L) percent = 1.0L;
+            position = static_cast<int>(percent * 10000.0L);
+        } else if (stats.stage == TransferStage::Committing &&
+                   stats.completedFiles == stats.totalFiles) {
+            position = 10000;
+        }
+        SendMessageW(m_hProgressBar, PBM_SETPOS, position, 0);
     }
     if (m_hProgressText) {
-        std::wstring text = utils::FormatBytes(stats.transferredBytes) + L" / "
+        std::wstring text = L"文件: " + std::to_wstring(stats.completedFiles) + L" / "
+            + std::to_wstring(stats.totalFiles) + L"  |  数据: "
+            + utils::FormatBytes(stats.transferredBytes) + L" / "
             + utils::FormatBytes(stats.totalBytes)
-            + L"  |  \u6700\u8fd1: " + utils::FormatSpeed(stats.recentSpeedBytesPerSec)
-            + L"  |  \u5e73\u5747: " + utils::FormatSpeed(stats.averageSpeedBytesPerSec)
-            + L"  |  \u9884\u8ba1\u5269\u4f59: "
-            + utils::FormatDuration(stats.estimatedRemainingSeconds);
+            + L"  |  最近: " + utils::FormatSpeed(stats.recentSpeedBytesPerSec)
+            + L"  |  平均: " + utils::FormatSpeed(stats.averageSpeedBytesPerSec)
+            + L"\r\n已用: " + utils::FormatDuration(stats.elapsedSeconds)
+            + L"  |  预计剩余: " + utils::FormatDuration(stats.estimatedRemainingSeconds)
+            + L"  |  预计总时间: " + utils::FormatDuration(stats.estimatedTotalSeconds);
+        if (stats.retryCount > 0)
+            text += L"  |  自动重试: " + std::to_wstring(stats.retryCount);
+        if (stats.stageBytes > 0)
+            text += L"  |  当前文件已发送: " + utils::FormatBytes(stats.stageBytes);
         if (stats.waitingForIo)
-            text += L"  (\u6b63\u5728\u7b49\u5f85\u78c1\u76d8/\u7f51\u7edc)";
+            text += L"  (正在等待磁盘/网络)";
         if (!stats.currentFile.empty())
-            text += L"\r\n\u5f53\u524d\u6587\u4ef6: " + stats.currentFile;
+            text += L"\r\n当前文件: " + stats.currentFile;
         SetWindowTextW(m_hProgressText, text.c_str());
     }
 }

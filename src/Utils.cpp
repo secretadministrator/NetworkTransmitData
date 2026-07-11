@@ -158,7 +158,7 @@ std::wstring NormalizePath(const std::wstring& path) {
 
 bool CreateDirectoryTree(const std::wstring& path) {
     if (path.empty()) return false;
-    if (CreateDirectoryW(path.c_str(), NULL))
+    if (CreateDirectoryW(NormalizePath(path).c_str(), NULL))
         return true;
     DWORD err = GetLastError();
     if (err == ERROR_ALREADY_EXISTS)

@@ -1,42 +1,46 @@
 #include "ProgressTracker.h"
 
 ProgressTracker::ProgressTracker() {
-    Reset(0);
+    Reset();
 }
 
-void ProgressTracker::Reset(int64_t totalBytes) {
-    m_total = totalBytes;
+void ProgressTracker::Reset() {
     m_transferred = 0;
-    m_currentFile.clear();
+    m_totalWork = 0;
+    m_completedWork = 0;
     m_samples.clear();
     m_startTime = std::chrono::steady_clock::now();
     m_lastTransferTime = m_startTime;
     m_lastSampleTime = m_startTime;
-    m_samples.push_back({0, m_startTime});
+    m_samples.push_back({0, 0, m_startTime});
 }
 
-void ProgressTracker::AddTransferred(int64_t bytes) {
+void ProgressTracker::SetWorkload(int64_t totalBytes, int totalFiles) {
+    Reset();
+    const int64_t fileWork = static_cast<int64_t>(totalFiles) * FILE_EQUIVALENT_BYTES;
+    m_totalWork = totalBytes > INT64_MAX - fileWork ? INT64_MAX : totalBytes + fileWork;
+}
+
+void ProgressTracker::AddCommitted(int64_t bytes, int files) {
+    if (bytes < 0 || files < 0)
+        return;
     m_transferred += bytes;
+    const int64_t fileWork = static_cast<int64_t>(files) * FILE_EQUIVALENT_BYTES;
+    const int64_t addedWork = bytes > INT64_MAX - fileWork
+        ? INT64_MAX : bytes + fileWork;
+    m_completedWork = m_completedWork > INT64_MAX - addedWork
+        ? INT64_MAX : m_completedWork + addedWork;
 
     auto now = std::chrono::steady_clock::now();
     m_lastTransferTime = now;
-    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_lastSampleTime).count();
-
-    if (elapsed >= 500) {
-        m_samples.push_back({ m_transferred, now });
-        // Ten intervals form an approximately five-second sliding window.
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now - m_lastSampleTime).count();
+    if (elapsed >= 500 || m_completedWork >= m_totalWork) {
+        m_samples.push_back({m_transferred, m_completedWork, now});
         while (m_samples.size() > 11)
             m_samples.pop_front();
         m_lastSampleTime = now;
     }
-}
-
-void ProgressTracker::SetCurrentFile(const std::wstring& file) {
-    m_currentFile = file;
-}
-
-void ProgressTracker::SetTotalFiles(int count) {
-    m_totalFiles = count;
 }
 
 int64_t ProgressTracker::CalculateSpeed(const SpeedSample& first, const SpeedSample& last)
@@ -64,15 +68,26 @@ int64_t ProgressTracker::GetSpeed() const {
     return CalculateSpeed(m_samples.front(), m_samples.back());
 }
 
-double ProgressTracker::GetPercent() const {
-    if (m_total == 0) return 0.0;
-    return (double)m_transferred / (double)m_total * 100.0;
+int64_t ProgressTracker::GetEstimatedRemainingSeconds() const {
+    if (m_samples.size() < 2) return -1;
+    const SpeedSample& first = m_samples.front();
+    const SpeedSample& last = m_samples.back();
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        last.time - first.time).count();
+    if (ms <= 0 || last.work <= first.work) return -1;
+    int64_t workSpeed = ((last.work - first.work) * 1000) / ms;
+    if (workSpeed <= 0) return -1;
+    int64_t remaining = m_totalWork - m_completedWork;
+    if (remaining <= 0) return 0;
+    return (remaining + workSpeed - 1) / workSpeed;
 }
 
-int64_t ProgressTracker::GetEstimatedRemainingSeconds() const {
-    int64_t speed = GetSpeed();
-    if (speed <= 0) return -1;
-    int64_t remaining = m_total - m_transferred;
-    if (remaining <= 0) return 0;
-    return (remaining + speed - 1) / speed;
+int64_t ProgressTracker::GetElapsedSeconds() const {
+    return std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - m_startTime).count();
+}
+
+int64_t ProgressTracker::GetEstimatedTotalSeconds() const {
+    int64_t remaining = GetEstimatedRemainingSeconds();
+    return remaining < 0 ? -1 : GetElapsedSeconds() + remaining;
 }

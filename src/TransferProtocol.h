@@ -7,24 +7,21 @@ enum class PacketType : uint8_t {
     DISCOVER_RESPONSE = 0x01,
     SERVER_HELLO = 0x02,
     CLIENT_HELLO = 0x03,
-    MANIFEST = 0x04,
-    TRANSFER_PLAN = 0x05,
-    FILE_HEADER = 0x06,
-    FILE_CHUNK = 0x07,
-    FILE_DONE = 0x08,
-    FILE_VERIFY = 0x09,
-    PROGRESS = 0x0A,
-    FILE_HASH = 0x0B,
-    FILE_DONE_ACK = 0x0C,
-    DONE_ACK = 0x0D,
-
-    HEARTBEAT = 0x0E,
-    HEARTBEAT_ACK = 0x0F,
     HELLO_ACK = 0x10,
-    PLAN_PROGRESS = 0x11,
+    SESSION_BEGIN = 0x15,
+    SESSION_READY = 0x16,
+    CATALOG_CHUNK = 0x17,
+    CATALOG_DONE = 0x18,
+    BATCH_DATA = 0x19,
+    BATCH_ACK = 0x1A,
+    FILE_BEGIN_V5 = 0x1B,
+    FILE_DATA_V5 = 0x1C,
+    FILE_END_V5 = 0x1D,
+    FILE_ACK_V5 = 0x1E,
+    SESSION_COMMIT = 0x1F,
+    SESSION_COMMIT_ACK = 0x20,
 
-    ERROR_MSG = 0xFF,
-    DONE = 0x00
+    ERROR_MSG = 0xFF
 };
 
 struct Packet {

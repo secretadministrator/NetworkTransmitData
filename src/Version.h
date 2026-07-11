@@ -11,7 +11,7 @@
 #ifdef __cplusplus
 namespace version {
 inline constexpr wchar_t APP_VERSION[] = L"1.1.0";
-inline constexpr int PROTOCOL_VERSION = 2;
+inline constexpr int PROTOCOL_VERSION = 5;
 inline constexpr wchar_t PROTOCOL_MAGIC[] = L"DirectTransfer";
 }
 #endif

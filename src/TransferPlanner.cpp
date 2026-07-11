@@ -31,6 +31,7 @@ TransferPlanner::Plan TransferPlanner::BuildPlan(const Manifest& manifest,
         pe.relativePath = entry.relativePath;
         pe.size = entry.size;
         pe.sha256 = entry.sha256;
+        pe.lastWriteTime = entry.lastWriteTime;
 
         std::wstring partPath = targetPath + L".dtpart";
         pe.offset = overwrite ? 0 : resumer.GetResumeOffset(partPath);
@@ -64,7 +65,11 @@ TransferPlanner::Plan TransferPlanner::BuildPlan(const Manifest& manifest,
             addTransfer();
         } else {
             auto existingSize = fs::file_size(targetPath, ec);
-            if (!ec && existingSize == entry.size) {
+            if (!ec && existingSize == entry.size && entry.sha256.empty()) {
+                pe.action = FileAction::TRANSFER;
+                pe.resumeHash.clear();
+                addTransfer();
+            } else if (!ec && existingSize == entry.size) {
                 progress.stage = L"正在校验已有文件";
                 pe.resumeHash = utils::ComputeSHA256(targetPath, -1,
                     [&](int64_t bytes) {
@@ -190,6 +195,7 @@ std::string TransferPlanner::SerializePlan(const Plan& plan) {
         obj["offset"] = e.offset;
         obj["sha256"] = e.sha256;
         obj["resumeHash"] = e.resumeHash;
+        obj["lastWriteTime"] = utils::ToUtf8(e.lastWriteTime);
         obj["action"] = static_cast<int>(e.action);
         arr.push_back(obj);
     }
@@ -212,6 +218,7 @@ TransferPlanner::Plan TransferPlanner::ParsePlanString(const std::string& json) 
                 e.offset = 0;
             e.sha256 = obj.value("sha256", std::string());
             e.resumeHash = obj.value("resumeHash", std::string());
+            e.lastWriteTime = utils::FromUtf8(obj.value("lastWriteTime", std::string()));
             e.action = static_cast<FileAction>(obj["action"].get<int>());
 
             if (e.action == FileAction::TRANSFER || e.action == FileAction::OVERWRITE) {

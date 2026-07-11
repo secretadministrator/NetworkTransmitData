@@ -15,6 +15,7 @@ struct PlanEntry {
     int64_t offset = 0;
     std::string sha256;
     std::string resumeHash;
+    std::wstring lastWriteTime;
     FileAction action = FileAction::TRANSFER;
 };
 

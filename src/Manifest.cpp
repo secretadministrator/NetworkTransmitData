@@ -15,6 +15,7 @@ std::string Manifest::ToJSON() const {
         obj["path"] = utils::ToUtf8(e.relativePath);
         obj["size"] = e.size;
         obj["sha256"] = e.sha256;
+        obj["lastWriteTime"] = utils::ToUtf8(e.lastWriteTime);
         arr.push_back(obj);
     }
     return arr.dump();
@@ -32,6 +33,7 @@ bool Manifest::FromJSON(const std::string& json) {
             entry.relativePath = utils::FromUtf8(pathA);
             entry.size = obj["size"].get<int64_t>();
             entry.sha256 = obj.value("sha256", std::string());
+            entry.lastWriteTime = utils::FromUtf8(obj.value("lastWriteTime", std::string()));
             m_totalSize += entry.size;
             m_entries.push_back(entry);
         }
