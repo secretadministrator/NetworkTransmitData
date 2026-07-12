@@ -468,6 +468,25 @@ LRESULT MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 break;
             }
             LogMessage(message);
+            if (result->code != TransferResultCode::Success &&
+                    result->code != TransferResultCode::Cancelled &&
+                    !result->failedFiles.empty()) {
+                std::wstring details = L"传输未完整完成，共 " +
+                    std::to_wstring(result->failedFiles.size()) + L" 个文件失败。\r\n\r\n";
+                const size_t shown = (std::min)(result->failedFiles.size(), size_t{5});
+                for (size_t i = 0; i < shown; ++i) {
+                    const TransferFailureInfo& failure = result->failedFiles[i];
+                    details += failure.relativePath + L"\r\n  " + failure.reason;
+                    if (failure.systemError != 0)
+                        details += L"（错误码 " + std::to_wstring(failure.systemError) + L"）";
+                    details += L"\r\n";
+                }
+                if (result->failedFiles.size() > shown)
+                    details += L"\r\n另有 " +
+                        std::to_wstring(result->failedFiles.size() - shown) + L" 个文件。\r\n";
+                details += L"\r\n详细记录已写入 logs 目录。";
+                MessageBoxW(m_hwnd, details.c_str(), L"传输文件失败", MB_OK | MB_ICONERROR);
+            }
             if (result->code == TransferResultCode::Success) {
                 LogMessage(L"\u4f20\u8f93\u603b\u7528\u65f6: " +
                     utils::FormatDuration(result->stats.elapsedSeconds));

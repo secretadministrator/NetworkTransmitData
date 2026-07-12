@@ -33,6 +33,34 @@ constexpr size_t SMALL_BATCH_MAX_FILES = 512;
 constexpr size_t SMALL_BATCH_MAX_BYTES = 8ULL * 1024 * 1024;
 constexpr size_t SMALL_BATCH_WINDOW = 4;
 constexpr DWORD LARGE_FILE_CHUNK = 1024 * 1024;
+constexpr int LARGE_FILE_MAX_ATTEMPTS = 3;
+
+enum class FileAckStatus : uint8_t {
+    Success = 1,
+    RetryCrcMismatch = 2,
+    RetryTemporaryIo = 3,
+    OpenFailed = 4,
+    WriteFailed = 5,
+    RenameFailed = 6,
+    SenderAborted = 7
+};
+
+bool IsRetryableFileStatus(uint8_t status) {
+    return status == static_cast<uint8_t>(FileAckStatus::RetryCrcMismatch) ||
+        status == static_cast<uint8_t>(FileAckStatus::RetryTemporaryIo);
+}
+
+std::wstring FileStatusReason(uint8_t status) {
+    switch (static_cast<FileAckStatus>(status)) {
+    case FileAckStatus::RetryCrcMismatch: return L"CRC32 校验不匹配";
+    case FileAckStatus::RetryTemporaryIo: return L"临时文件 I/O 冲突";
+    case FileAckStatus::OpenFailed: return L"无法创建接收临时文件";
+    case FileAckStatus::WriteFailed: return L"写入接收临时文件失败";
+    case FileAckStatus::RenameFailed: return L"无法提交接收文件";
+    case FileAckStatus::SenderAborted: return L"发送端读取文件失败";
+    default: return L"未知文件错误";
+    }
+}
 
 void AppendU8(std::vector<uint8_t>& out, uint8_t value) {
     out.push_back(value);
@@ -547,6 +575,7 @@ struct TransferSession::ReceiverTaskState {
     uint32_t nextCatalogSequence = 0;
     std::vector<FileEntry> catalog;
     std::vector<bool> committed;
+    std::unordered_map<uint64_t, int> fileAttempts;
     bool catalogReady = false;
     bool completed = false;
     ProgressTracker progress;
@@ -559,6 +588,7 @@ struct TransferSession::ReceiverTaskState {
         nextCatalogSequence = 0;
         catalog.clear();
         committed.clear();
+        fileAttempts.clear();
         catalogReady = false;
         completed = false;
         progress.SetWorkload(static_cast<int64_t>(bytes), static_cast<int>(files));
@@ -577,6 +607,21 @@ void TransferSession::Log(const std::wstring& message) {
         m_logCb(message);
 }
 
+void TransferSession::RecordFileFailure(const std::wstring& relativePath,
+    const std::wstring& reason, DWORD systemError, int attempts, bool finalFailure) {
+    std::wstring message = finalFailure ? L"[文件最终失败] " : L"[文件重试] ";
+    message += relativePath + L"；原因：" + reason;
+    if (systemError != 0)
+        message += L"；系统错误码：" + std::to_wstring(systemError);
+    message += L"；尝试：" + std::to_wstring(attempts) + L"/" +
+        std::to_wstring(LARGE_FILE_MAX_ATTEMPTS);
+    Log(message);
+    if (!finalFailure)
+        return;
+    std::lock_guard<std::mutex> lock(m_failureMutex);
+    m_failedFiles.push_back({relativePath, reason, systemError, attempts});
+}
+
 void TransferSession::ReportProgress(bool force) {
     const ULONGLONG now = GetTickCount64();
     const ULONGLONG previous = m_lastProgressReportTick.load();
@@ -593,6 +638,10 @@ TransferResult TransferSession::FinalizeResult(TransferResult result) {
     result.socketError = m_lastSocketError.load();
     result.resumable = false;
     result.stats = m_stats;
+    {
+        std::lock_guard<std::mutex> lock(m_failureMutex);
+        result.failedFiles = m_failedFiles;
+    }
     return result;
 }
 
@@ -605,6 +654,10 @@ bool TransferSession::StartAsSender(const std::wstring& sourceDir,
     m_stats = TransferStats{};
     m_lastProgressReportTick.store(0);
     m_lastSocketError.store(0);
+    {
+        std::lock_guard<std::mutex> lock(m_failureMutex);
+        m_failedFiles.clear();
+    }
     m_role = SessionRole::SENDER;
     m_running = true;
     m_workerThread = std::thread(&TransferSession::SenderWorker, this,
@@ -621,6 +674,10 @@ bool TransferSession::StartAsReceiver(const std::wstring& targetDir, int port,
     m_stats = TransferStats{};
     m_lastProgressReportTick.store(0);
     m_lastSocketError.store(0);
+    {
+        std::lock_guard<std::mutex> lock(m_failureMutex);
+        m_failedFiles.clear();
+    }
     m_role = SessionRole::RECEIVER;
     m_running = true;
     m_workerThread = std::thread(&TransferSession::ReceiverWorker, this,
@@ -1065,15 +1122,19 @@ TransferResult TransferSession::RunSenderConnection(const std::wstring& sourceDi
             if (count > 0 && batch.size() + recordBytes > SMALL_BATCH_MAX_BYTES)
                 break;
             const std::wstring fullPath = sourceDir + L"\\" + entry.relativePath;
-            if (!SourceFileMatches(fullPath, entry))
+            if (!SourceFileMatches(fullPath, entry)) {
+                RecordFileFailure(entry.relativePath, L"源文件在盘点后发生变化", 0, 1, true);
                 return MakeResult(TransferResultCode::FileError,
                     L"源文件在盘点后发生变化：" + entry.relativePath);
+            }
             ScopedHandle file(CreateFileW(utils::NormalizePath(fullPath).c_str(),
                 GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
                 FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
-            if (file.Get() == INVALID_HANDLE_VALUE)
+            if (file.Get() == INVALID_HANDLE_VALUE) {
+                RecordFileFailure(entry.relativePath, L"无法读取源文件", GetLastError(), 1, true);
                 return MakeResult(TransferResultCode::FileError,
                     L"无法读取源文件：" + entry.relativePath);
+            }
             std::vector<uint8_t> data(static_cast<size_t>(entry.size));
             size_t readTotal = 0;
             while (readTotal < data.size()) {
@@ -1081,6 +1142,7 @@ TransferResult TransferSession::RunSenderConnection(const std::wstring& sourceDi
                 const DWORD request = static_cast<DWORD>(data.size() - readTotal);
                 if (!ReadFile(file.Get(), data.data() + readTotal, request, &readNow, nullptr) ||
                     readNow == 0) {
+                    RecordFileFailure(entry.relativePath, L"读取源文件失败", GetLastError(), 1, true);
                     return MakeResult(TransferResultCode::FileError,
                         L"读取源文件失败：" + entry.relativePath);
                 }
@@ -1090,6 +1152,8 @@ TransferResult TransferSession::RunSenderConnection(const std::wstring& sourceDi
             DWORD extraRead = 0;
             if (!ReadFile(file.Get(), &extra, 1, &extraRead, nullptr) || extraRead != 0 ||
                 !SourceFileMatches(fullPath, entry)) {
+                RecordFileFailure(entry.relativePath,
+                    L"源文件在读取期间发生变化", GetLastError(), 1, true);
                 return MakeResult(TransferResultCode::FileError,
                     L"源文件在读取期间发生变化：" + entry.relativePath);
             }
@@ -1134,8 +1198,9 @@ TransferResult TransferSession::RunSenderConnection(const std::wstring& sourceDi
             return MakeResult(TransferResultCode::ConnectionLost,
                 L"小文件批次确认不属于当前窗口，正在重连恢复");
         }
-        if (status != 1)
+        if (status != 1) {
             return MakeResult(TransferResultCode::FileError, L"接收端提交小文件批次失败");
+        }
         BatchDescriptor descriptor = std::move(pending->second);
         pendingBatches.erase(pending);
         int newlyCommitted = 0;
@@ -1160,14 +1225,26 @@ TransferResult TransferSession::RunSenderConnection(const std::wstring& sourceDi
         if (entry.size <= SMALL_FILE_LIMIT || context.committed.count(fileId) != 0)
             continue;
         const std::wstring fullPath = sourceDir + L"\\" + entry.relativePath;
-        if (!SourceFileMatches(fullPath, entry))
+        if (!SourceFileMatches(fullPath, entry)) {
+            RecordFileFailure(entry.relativePath, L"源文件在盘点后发生变化", 0, 1, true);
             return MakeResult(TransferResultCode::FileError,
                 L"源文件在盘点后发生变化：" + entry.relativePath);
+        }
         ScopedHandle file(CreateFileW(utils::NormalizePath(fullPath).c_str(), GENERIC_READ,
             FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
-        if (file.Get() == INVALID_HANDLE_VALUE)
+        if (file.Get() == INVALID_HANDLE_VALUE) {
+            RecordFileFailure(entry.relativePath, L"无法读取源文件", GetLastError(), 1, true);
             return MakeResult(TransferResultCode::FileError, L"无法读取源文件：" + entry.relativePath);
+        }
 
+        for (int attempt = 1; attempt <= LARGE_FILE_MAX_ATTEMPTS; ++attempt) {
+        LARGE_INTEGER fileStart{};
+        if (!SetFilePointerEx(file.Get(), fileStart, nullptr, FILE_BEGIN)) {
+            const DWORD error = GetLastError();
+            RecordFileFailure(entry.relativePath, L"无法重新定位源文件", error, attempt, true);
+            return MakeResult(TransferResultCode::FileError,
+                L"无法读取源文件：" + entry.relativePath);
+        }
         std::vector<uint8_t> beginFile;
         AppendU64(beginFile, fileId);
         AppendU64(beginFile, static_cast<uint64_t>(entry.size));
@@ -1280,6 +1357,8 @@ TransferResult TransferSession::RunSenderConnection(const std::wstring& sourceDi
             AppendU64(aborted, fileId);
             AppendU32(aborted, 0);
             SendPacket(socket, static_cast<uint8_t>(PacketType::FILE_END_V5), aborted);
+            RecordFileFailure(entry.relativePath,
+                L"源文件读取失败或读取期间发生变化", 0, attempt, true);
             return MakeResult(TransferResultCode::FileError,
                 L"源文件在读取期间发生变化：" + entry.relativePath);
         }
@@ -1300,8 +1379,19 @@ TransferResult TransferSession::RunSenderConnection(const std::wstring& sourceDi
             pos != ack.size() || ackId != fileId) {
             return MakeResult(TransferResultCode::ProtocolError, L"大文件确认不匹配");
         }
-        if (status != 1)
-            return MakeResult(TransferResultCode::FileError, L"接收端提交大文件失败");
+        if (status != static_cast<uint8_t>(FileAckStatus::Success)) {
+            const std::wstring reason = FileStatusReason(status);
+            if (IsRetryableFileStatus(status) && attempt < LARGE_FILE_MAX_ATTEMPTS) {
+                RecordFileFailure(entry.relativePath, reason, 0, attempt, false);
+                continue;
+            }
+            RecordFileFailure(entry.relativePath, reason, 0, attempt, true);
+            return MakeResult(TransferResultCode::FileError,
+                L"接收端提交大文件失败：" + entry.relativePath + L"（" + reason + L"）");
+        }
+        if (attempt > 1)
+            Log(L"[文件重试成功] " + entry.relativePath + L"；尝试：" +
+                std::to_wstring(attempt) + L"/" + std::to_wstring(LARGE_FILE_MAX_ATTEMPTS));
         if (context.committed.insert(fileId).second)
             context.progress.AddCommitted(entry.size);
         m_stats.completedFiles = static_cast<int>(context.committed.size());
@@ -1309,6 +1399,8 @@ TransferResult TransferSession::RunSenderConnection(const std::wstring& sourceDi
         m_stats.stageBytes = 0;
         UpdateStats(context.progress, m_stats);
         ReportProgress();
+        break;
+        }
     }
 
     m_stats.stage = TransferStage::Committing;
@@ -1677,6 +1769,10 @@ ReceiverConnectionResult TransferSession::HandleReceiverConnection(SOCKET socket
                     for (size_t i = 0; i < results.size(); ++i) {
                         if (results[i] != 1) {
                             completedOk = false;
+                            const uint64_t failedId = requestIds[i];
+                            RecordFileFailure(
+                                state.catalog[static_cast<size_t>(failedId)].relativePath,
+                                L"小文件 CRC 校验、写入或提交失败", 0, 1, true);
                             continue;
                         }
                         const uint64_t fileId = requestIds[i];
@@ -1726,13 +1822,23 @@ ReceiverConnectionResult TransferSession::HandleReceiverConnection(SOCKET socket
             const FileEntry& entry = state.catalog[static_cast<size_t>(fileId)];
             std::wstring fullPath;
             bool fileOk = prepareTarget(entry, fullPath);
+            DWORD fileError = fileOk ? ERROR_SUCCESS : GetLastError();
+            uint8_t failureStatus = fileOk
+                ? static_cast<uint8_t>(FileAckStatus::Success)
+                : static_cast<uint8_t>(FileAckStatus::OpenFailed);
             const std::wstring partPath = fullPath + L".dtpart";
             ScopedHandle file(fileOk
                 ? CreateFileW(utils::NormalizePath(partPath).c_str(), GENERIC_WRITE, 0,
                     nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr)
                 : INVALID_HANDLE_VALUE);
-            if (file.Get() == INVALID_HANDLE_VALUE)
+            if (file.Get() == INVALID_HANDLE_VALUE) {
                 fileOk = false;
+                fileError = GetLastError();
+                failureStatus = (fileError == ERROR_SHARING_VIOLATION ||
+                    fileError == ERROR_LOCK_VIOLATION)
+                    ? static_cast<uint8_t>(FileAckStatus::RetryTemporaryIo)
+                    : static_cast<uint8_t>(FileAckStatus::OpenFailed);
+            }
             constexpr size_t LARGE_FILE_PIPELINE_DEPTH = 4;
             std::mutex writeMutex;
             std::condition_variable writeReady;
@@ -1761,9 +1867,13 @@ ReceiverConnectionResult TransferSession::HandleReceiverConnection(SOCKET socket
                     const DWORD dataSize = static_cast<DWORD>(chunk.size() - 8);
                     crc.Update(chunk.data() + 8, dataSize);
                     DWORD written = 0;
-                    if (fileOk && (!WriteFile(file.Get(), chunk.data() + 8,
-                            dataSize, &written, nullptr) || written != dataSize)) {
+                    const BOOL writeOk = fileOk
+                        ? WriteFile(file.Get(), chunk.data() + 8,
+                            dataSize, &written, nullptr) : FALSE;
+                    if (fileOk && (!writeOk || written != dataSize)) {
                         fileOk = false;
+                        fileError = writeOk ? ERROR_WRITE_FAULT : GetLastError();
+                        failureStatus = static_cast<uint8_t>(FileAckStatus::WriteFailed);
                     }
                 }
                 actualCrc = crc.Finish();
@@ -1783,6 +1893,7 @@ ReceiverConnectionResult TransferSession::HandleReceiverConnection(SOCKET socket
                 }
                 if (chunkType == static_cast<uint8_t>(PacketType::ERROR_MSG)) {
                     senderAborted = true;
+                    failureStatus = static_cast<uint8_t>(FileAckStatus::SenderAborted);
                     break;
                 }
                 if (chunkType != static_cast<uint8_t>(PacketType::FILE_DATA_V5)) {
@@ -1819,30 +1930,57 @@ ReceiverConnectionResult TransferSession::HandleReceiverConnection(SOCKET socket
             }
             writeReady.notify_all();
             writer.join();
-            if (receiveFailed)
+            if (receiveFailed) {
+                file.Close();
+                DeleteFileW(utils::NormalizePath(partPath).c_str());
+                Log(L"[文件传输中断] " + entry.relativePath + L"；等待连接恢复后重传");
                 return ReceiverConnectionResult::ConnectionLost;
-            if (protocolFailed)
+            }
+            if (protocolFailed) {
+                file.Close();
+                DeleteFileW(utils::NormalizePath(partPath).c_str());
+                RecordFileFailure(entry.relativePath, L"大文件数据包不匹配", 0, 1, true);
+                ++m_stats.failedFiles;
                 return ReceiverConnectionResult::Failed;
+            }
             std::vector<uint8_t> end;
             uint8_t endType = 0;
             io = RecvPacket(socket, endType, end);
-            if (!io.IsOk())
+            if (!io.IsOk()) {
+                file.Close();
+                DeleteFileW(utils::NormalizePath(partPath).c_str());
+                Log(L"[文件传输中断] " + entry.relativePath + L"；等待连接恢复后重传");
                 return ReceiverConnectionResult::ConnectionLost;
+            }
             size_t endPos = 0;
             uint64_t endId = 0;
             uint32_t expectedCrc = 0;
             if (endType != static_cast<uint8_t>(PacketType::FILE_END_V5) ||
                 !ReadU64(end, endPos, endId) || !ReadU32(end, endPos, expectedCrc) ||
                 endPos != end.size() || endId != fileId) {
+                file.Close();
+                DeleteFileW(utils::NormalizePath(partPath).c_str());
+                RecordFileFailure(entry.relativePath, L"大文件结束包不匹配", 0, 1, true);
+                ++m_stats.failedFiles;
                 return ReceiverConnectionResult::Failed;
             }
-            if (remaining != 0 || senderAborted || actualCrc != expectedCrc)
+            if (remaining != 0 || senderAborted) {
                 fileOk = false;
+            } else if (actualCrc != expectedCrc) {
+                fileOk = false;
+                failureStatus = static_cast<uint8_t>(FileAckStatus::RetryCrcMismatch);
+            }
             file.Close();
             if (fileOk && !state.committed[static_cast<size_t>(fileId)]) {
                 if (!MoveFileExW(utils::NormalizePath(partPath).c_str(),
                         utils::NormalizePath(fullPath).c_str(), MOVEFILE_REPLACE_EXISTING)) {
                     fileOk = false;
+                    fileError = GetLastError();
+                    failureStatus = (fileError == ERROR_SHARING_VIOLATION ||
+                        fileError == ERROR_LOCK_VIOLATION ||
+                        fileError == ERROR_ACCESS_DENIED)
+                        ? static_cast<uint8_t>(FileAckStatus::RetryTemporaryIo)
+                        : static_cast<uint8_t>(FileAckStatus::RenameFailed);
                 } else {
                     state.committed[static_cast<size_t>(fileId)] = true;
                     state.progress.AddCommitted(entry.size);
@@ -1853,13 +1991,33 @@ ReceiverConnectionResult TransferSession::HandleReceiverConnection(SOCKET socket
             }
             std::vector<uint8_t> ack;
             AppendU64(ack, fileId);
-            AppendU8(ack, fileOk ? 1 : 0);
+            int attempts = 0;
+            bool retryable = false;
+            if (!fileOk) {
+                attempts = ++state.fileAttempts[fileId];
+                retryable = IsRetryableFileStatus(failureStatus) &&
+                    attempts < LARGE_FILE_MAX_ATTEMPTS;
+                RecordFileFailure(entry.relativePath, FileStatusReason(failureStatus),
+                    fileError, attempts, !retryable);
+                if (!DeleteFileW(utils::NormalizePath(partPath).c_str())) {
+                    const DWORD cleanupError = GetLastError();
+                    if (cleanupError != ERROR_FILE_NOT_FOUND)
+                        Log(L"[临时文件清理失败] " + entry.relativePath +
+                            L"；系统错误码：" + std::to_wstring(cleanupError));
+                }
+            } else {
+                state.fileAttempts.erase(fileId);
+            }
+            AppendU8(ack, fileOk
+                ? static_cast<uint8_t>(FileAckStatus::Success) : failureStatus);
             io = SendPacket(socket, static_cast<uint8_t>(PacketType::FILE_ACK_V5), ack);
             if (!io.IsOk())
                 return ReceiverConnectionResult::ConnectionLost;
             m_stats.stageBytes = 0;
             ReportProgress(true);
             if (!fileOk) {
+                if (retryable)
+                    continue;
                 ++m_stats.failedFiles;
                 return ReceiverConnectionResult::Failed;
             }

@@ -83,6 +83,13 @@ struct TransferStats {
     std::wstring stageText;
 };
 
+struct TransferFailureInfo {
+    std::wstring relativePath;
+    std::wstring reason;
+    DWORD systemError = 0;
+    int attempts = 0;
+};
+
 struct TransferResult {
     TransferResultCode code = TransferResultCode::InternalError;
     TransferRole role = TransferRole::NONE;
@@ -90,6 +97,7 @@ struct TransferResult {
     bool resumable = false;
     std::wstring message;
     TransferStats stats;
+    std::vector<TransferFailureInfo> failedFiles;
 };
 
 enum class ReceiverConnectionResult {
@@ -138,6 +146,8 @@ private:
     DoneCallback m_doneCb;
     std::atomic<int> m_lastSocketError{0};
     std::atomic<ULONGLONG> m_lastProgressReportTick{0};
+    std::mutex m_failureMutex;
+    std::vector<TransferFailureInfo> m_failedFiles;
 
     static constexpr DWORD HANDSHAKE_TIMEOUT_MS = 30000;
     static constexpr DWORD IO_WAIT_TIMEOUT_MS = 5000;
@@ -169,6 +179,8 @@ private:
 
     void CloseActiveSocket(SOCKET expected = INVALID_SOCKET);
     void Log(const std::wstring& message);
+    void RecordFileFailure(const std::wstring& relativePath,
+        const std::wstring& reason, DWORD systemError, int attempts, bool finalFailure);
     void ReportProgress(bool force = false);
     TransferResult FinalizeResult(TransferResult result);
 };
