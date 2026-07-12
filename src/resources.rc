@@ -1,5 +1,8 @@
 #include <windows.h>
 #include "Version.h"
+#include "Resource.h"
+
+IDI_MAIN_APP ICON "..\\favicon.ico"
 
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "DirectTransfer.exe.manifest"
 

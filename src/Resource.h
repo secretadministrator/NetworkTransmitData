@@ -1,5 +1,8 @@
 #pragma once
 
+// Icon resource ID
+#define IDI_MAIN_APP            1
+
 // Control IDs
 #define IDC_PAGE_CONTAINER     100
 #define IDC_BTN_SEND           101

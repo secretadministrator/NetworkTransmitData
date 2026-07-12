@@ -13,5 +13,8 @@ public:
 private:
     HWND m_hParent;
     HWND m_hMainWnd;
+    HWND m_hIconControl = nullptr;
+    HFONT m_hDOSFont = nullptr;
     void CreateControls(const RECT& rc);
+    HFONT CreateDOSFont(UINT dpi);
 };

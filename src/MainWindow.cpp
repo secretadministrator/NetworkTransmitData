@@ -60,7 +60,7 @@ void MainWindow::RegisterWindowClass() {
     WNDCLASSW wc = {};
     wc.lpfnWndProc = MainWindow::StaticWndProc;
     wc.hInstance = m_hInst;
-    wc.hIcon = LoadIconA(NULL, IDI_APPLICATION);
+    wc.hIcon = LoadIconW(m_hInst, MAKEINTRESOURCEW(IDI_MAIN_APP));
     wc.hCursor = LoadCursorA(NULL, IDC_ARROW);
     wc.hbrBackground = nullptr;
     wc.lpszClassName = L"DirectTransferMain";
@@ -79,12 +79,19 @@ bool MainWindow::Create(HINSTANCE hInst, int nCmdShow) {
     int x = (desk.right - windowWidth) / 2;
     int y = (desk.bottom - windowHeight) / 2;
 
-    std::wstring title = L"DirectTransfer " + std::wstring(version::APP_VERSION)
-        + L" - \u76f4\u8fde\u4f20\u8f93\u5de5\u5177";
+    std::wstring title = L"DirectTransfer " + std::wstring(version::APP_VERSION);
     m_hwnd = CreateWindowExW(0, L"DirectTransferMain", title.c_str(),
         WS_OVERLAPPEDWINDOW, x, y, windowWidth, windowHeight,
         NULL, NULL, m_hInst, this);
     if (!m_hwnd) return false;
+
+    {
+        HICON hIcon = LoadIconW(m_hInst, MAKEINTRESOURCEW(IDI_MAIN_APP));
+        if (hIcon) {
+            SendMessageW(m_hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
+            SendMessageW(m_hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
+        }
+    }
 
     m_dpi = QueryWindowDpi(m_hwnd);
     UpdateFonts(m_dpi);
