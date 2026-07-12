@@ -5,19 +5,20 @@
 #include "ReceiverPage.h"
 #include "AuditLogger.h"
 #include "ConsoleTheme.h"
+#include "Utils.h"
 #include "Version.h"
 #include <algorithm>
 #include <vector>
 
 static constexpr int WINDOW_WIDTH = 820;
-static constexpr int WINDOW_HEIGHT = 720;
-static constexpr int LOG_HEIGHT = 112;
-static constexpr int DASHBOARD_HEIGHT = 174;
-static constexpr int STATUS_HEIGHT = 24;
-static constexpr int PAGE_TOP = 12;
+static constexpr int WINDOW_HEIGHT = 580;
+static constexpr int LOG_HEIGHT = 78;
+static constexpr int DASHBOARD_HEIGHT = 120;
+static constexpr int STATUS_HEIGHT = 22;
+static constexpr int PAGE_TOP = 6;
 
 static HFONT CreateUIFont(int pointSize, UINT dpi, int weight = FW_NORMAL) {
-    return console_theme::CreateFontForDpi(pointSize, dpi, L"Microsoft YaHei UI", weight);
+    return console_theme::CreateFontForDpi(pointSize, dpi, L"Consolas", weight);
 }
 
 static UINT QueryWindowDpi(HWND hwnd) {
@@ -35,7 +36,7 @@ MainWindow::MainWindow() {
     m_hBackgroundBrush = CreateSolidBrush(console_theme::BACKGROUND);
     m_hEditBrush = CreateSolidBrush(console_theme::PANEL_ALT);
     m_hPrimaryButtonBrush = CreateSolidBrush(console_theme::ACCENT);
-    m_hPrimaryPressedBrush = CreateSolidBrush(RGB(30, 190, 116));
+    m_hPrimaryPressedBrush = CreateSolidBrush(RGB(55, 55, 55));
     m_hButtonBrush = CreateSolidBrush(console_theme::PANEL_ALT);
     m_hButtonPressedBrush = CreateSolidBrush(console_theme::PANEL);
     m_hPrimaryButtonPen = CreatePen(PS_SOLID, 1, console_theme::ACCENT);
@@ -152,21 +153,23 @@ void MainWindow::LayoutChildren() {
     if (!m_hwnd || !m_pageContainer) return;
     RECT client = {};
     GetClientRect(m_hwnd, &client);
-    const int gap = Dip(6);
-    const int margin = Dip(16);
+    const int gap = Dip(4);
+    const int margin = Dip(10);
     const int statusH = Dip(STATUS_HEIGHT);
     const int logH = Dip(LOG_HEIGHT);
     const int dashboardH = Dip(DASHBOARD_HEIGHT);
     const int statusY = client.bottom - statusH;
-    const int logY = statusY - gap - logH;
+    const bool dashboardVisible = IsWindowVisible(m_dashboard.GetHWND()) != FALSE;
+    const int combinedLogH = dashboardVisible ? logH : logH + gap + dashboardH;
+    const int logY = statusY - gap - combinedLogH;
     const int dashboardY = logY - gap - dashboardH;
     const int pageTop = Dip(PAGE_TOP);
-    const int pageBottom = dashboardY - gap;
+    const int pageBottom = dashboardVisible ? dashboardY - gap : logY - gap;
 
     MoveWindow(m_pageContainer, 0, pageTop, client.right,
         (std::max)(0, pageBottom - pageTop), TRUE);
     MoveWindow(m_dashboard.GetHWND(), 0, dashboardY, client.right, dashboardH, TRUE);
-    MoveWindow(m_logView.GetHWND(), 0, logY, client.right, logH, TRUE);
+    MoveWindow(m_logView.GetHWND(), 0, logY, client.right, combinedLogH, TRUE);
     MoveWindow(m_hStatusBar, 0, statusY, client.right, statusH, TRUE);
     MoveWindow(m_hReconnectButton, client.right - margin - Dip(170),
         dashboardY + Dip(20), Dip(170), Dip(30), TRUE);
@@ -235,7 +238,10 @@ void MainWindow::SetStatusText(const std::wstring& text) {
 }
 
 void MainWindow::OnTransferProgress(const TransferStats& stats) {
+    const bool wasHidden = IsWindowVisible(m_dashboard.GetHWND()) == FALSE;
     ShowWindow(m_dashboard.GetHWND(), SW_SHOW);
+    if (wasHidden)
+        LayoutChildren();
     m_dashboard.SetStats(stats);
     if (stats.stage == TransferStage::Reconnecting)
         SetStatusText(L"[ RECONNECTING ]");
@@ -269,8 +275,11 @@ void MainWindow::DrawButton(DRAWITEMSTRUCT* dis) {
     SelectObject(hdc, oldBrush);
     HFONT oldFont = (HFONT)SelectObject(hdc, m_hSimSunFont);
     SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, disabled ? console_theme::TEXT_DIM
-        : (primary ? console_theme::BACKGROUND : console_theme::TEXT));
+    const COLORREF textColor = dis->CtlID == IDC_BTN_START
+        ? console_theme::BACKGROUND
+        : (disabled ? console_theme::TEXT_DIM
+                    : (primary ? console_theme::BACKGROUND : console_theme::TEXT));
+    SetTextColor(hdc, textColor);
     DrawTextW(hdc, text, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     SelectObject(hdc, oldFont);
     if (focused && !disabled) {
@@ -316,7 +325,7 @@ LRESULT MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_GETMINMAXINFO: {
         MINMAXINFO* info = reinterpret_cast<MINMAXINFO*>(lp);
         info->ptMinTrackSize.x = Dip(680);
-        info->ptMinTrackSize.y = Dip(620);
+        info->ptMinTrackSize.y = Dip(540);
         return 0;
     }
     case WM_COMMAND: {
@@ -459,12 +468,17 @@ LRESULT MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 break;
             }
             LogMessage(message);
+            if (result->code == TransferResultCode::Success) {
+                LogMessage(L"\u4f20\u8f93\u603b\u7528\u65f6: " +
+                    utils::FormatDuration(result->stats.elapsedSeconds));
+            }
             delete result;
         }
         if (!preserveConnectionLostUi) {
             m_dashboard.Clear();
             ShowWindow(m_dashboard.GetHWND(), SW_HIDE);
             ShowWindow(m_hReconnectButton, SW_HIDE);
+            LayoutChildren();
             SetStatusText(L"[ READY ]");
         } else {
             ShowWindow(m_dashboard.GetHWND(), SW_SHOW);

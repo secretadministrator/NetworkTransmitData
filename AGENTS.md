@@ -1,107 +1,73 @@
 # AGENTS.md
 
-## Project
+## 项目概览
 
-**DirectTransfer** - C++17 Win32 GUI point-to-point file transfer tool.
-It uses Winsock TCP with a custom binary v5 protocol, not SMB, Robocopy, net shares, or Windows credentials.
+DirectTransfer 是 C++17 Win32 GUI 的 Windows 点对点目录传输工具。当前主线是一个单独的 `DirectTransfer.exe`：发送端扫描源目录并连接接收端；接收端创建会话令牌、监听发现和 TCP 连接，再安全地写入目标目录。
 
-- **Language**: C++17, Win32 API, Simplified Chinese UI strings in source
-- **UI style**: Dark terminal-inspired theme (`ConsoleTheme.h`), owner-draw controls, DPI-aware
-- **Build**: CMake + Ninja, MinGW-W64 g++ 16.1, CMake 4.3.2, Ninja 1.13.2
-- **Dependency**: nlohmann/json v3.11.3, header-only, downloaded by CMake when absent
-- **Tests/CI**: none
+- 界面文本为简体中文宽字符串；视觉风格由 `ConsoleTheme.h` 定义。
+- 网络协议为自定义 v5，不使用 SMB、网络共享、Robocopy、IPC$ 或 Windows 凭据。
+- 默认端口为 UDP/TCP `49321`，协议版本和程序版本定义在 `src/Version.h`。
+- 构建系统为 CMake + Ninja；目标为 MinGW-w64 C++17，并使用 `-static` 链接。
+- `external/nlohmann/json.hpp` 是随仓库提供的头文件依赖；当前 v5 数据通道不以 JSON 清单作为主协议。
+- 没有自动化测试或 CI；修改后至少应完成可用的 CMake 构建验证。
 
-## Build and run
+## 构建与验证
 
 ```powershell
 cmake -G Ninja -DCMAKE_CXX_COMPILER=g++ -B build
 cmake --build build
-.\build\DirectTransfer.exe
 ```
 
-## Architecture
+需要实机验证网络功能时，使用两台可互通的 Windows 主机。允许 UDP/TCP 49321；不要让程序自动创建防火墙规则。静态 IP / DHCP 恢复是可选管理员功能，不能成为常规传输的前置条件。
 
-Single EXE with two startup roles and a dark console-style dashboard:
+## 架构与职责
 
 ```text
-DirectTransfer.exe
-|-- Sender   - scan source dir, discover/manual-select receiver,
-|              verify protocol version, send files over TCP with v5 binary protocol
-`-- Receiver - choose target dir, auto-generate session token, receive files
-               to .dtpart temp files, then rename on completion
+main.cpp
+└── MainWindow
+    ├── RoleSelectPage
+    ├── SenderPage ── NetworkDiscovery ── TransferSession (sender)
+    └── ReceiverPage ─ NetworkDiscovery ── TransferSession (receiver)
+                                           ├── FileScanner / ExcludeRules
+                                           ├── ProgressTracker
+                                           └── AuditLogger / ReportGenerator
 ```
 
-## Key decisions
+- `MainWindow` 接收 `WM_DISCOVERY_*`、`WM_TRANSFER_*` 消息并更新仪表板、日志和状态栏。工作线程不得直接操作控件。
+- `NetworkDiscovery` 使用 UDP 发现接收端，手工 IP 也会通过定向 UDP 请求取得会话令牌。
+- `TransferSession` 是 v5 传输状态机：握手、目录、批次或流式文件传输、提交确认与发送端重连均在此实现。
+- `FileScanner` 递归扫描，跳过重解析点，并由 `ExcludeRules` 排除系统目录和分页文件。
+- `IpConfigurator` 通过 WMI 设置静态 IPv4 或 DHCP；仅在用户明确操作且进程已提权时使用。
+- `Manifest`、`TransferPlanner`、`ResumeManager` 是旧的 JSON 计划/续传辅助模块，不要把它们误写成 v5 主传输路径的必经步骤。当前发送页的模式下拉框没有传给 `TransferSession`；接收页传入的模式在 v5 主路径中仅用于镜像清理。
 
-- **No SMB / net share / IPC$ / Robocopy**: custom Winsock TCP on port `49321`.
-- **No registry modifications**: no LSA policy changes.
-- **No auto firewall rule**: users handle firewall/admin setup when needed.
-- **IP config is optional**: APIPA/manual IP must work without admin. Admin static IP setup is only a helper for `192.168.88.x`.
-- **Authentication**: session token exchanged via UDP discovery, not 6-digit pairing code.
-- **Protocol version v5**: SERVER_HELLO/CLIENT_HELLO/HELLO_ACK handshake verifies protocol compatibility.
-- **Binary catalog**: sender encodes file entries in binary format with CRC32 checksum; receiver builds commit plan per-file.
-- **Small file batch windowing**: up to 512 files per batch, up to 4 batches in-flight concurrently; sender waits for BATCH_ACK per batch.
-- **Large file streaming**: individual FILE_BEGIN_V5 / FILE_DATA_V5 / FILE_END_V5 / FILE_ACK_V5 flow with CRC32.
-- **Automatic reconnect**: sender retries with exponential backoff (1s → 15s max) on connection loss; already-committed files are not retransmitted (tracked by file ID).
-- **Integrity**: CRC32 per file chunk during transfer; source file stability verified before and after read (`SourceFileMatches`).
-- **`.dtpart` temp files**: receiver writes to `.dtpart`, renames to final name on completion. Small files are written concurrently by a thread pool tuned to disk type (1 thread for HDD, 4 for SSD).
-- **Transfer timeout**: handshake uses 30s socket timeout; file transfer uses 5s I/O wait with 90s idle timeout before reconnect.
-- **Progress**: byte-level tracking via `ProgressTracker`, speed averaged over 10 samples, displayed via `ConsoleDashboard` custom owner-draw control.
-- **Mirror mode**: UI label is `L"\u540c\u6b65\u955c\u50cf"` ("sync mirror"); target-only files are deleted before receiving.
-- **AV false-positive mitigation**: keep VERSIONINFO resource; avoid startup firewall COM automation and subnet-directed broadcast enumeration.
+## v5 协议与传输约束
 
-## Source layout
+- TCP 包格式为 `1 字节类型 + 4 字节小端负载长度 + 负载`；单包负载最大 64 MiB。
+- 握手顺序：`SERVER_HELLO` → `CLIENT_HELLO` → `HELLO_ACK`。双方必须验证 `DirectTransfer` 标识、协议版本和会话令牌。
+- 发送端发送 `SESSION_BEGIN` 和二进制目录块；接收端以目录 CRC32 校验并返回 `SESSION_READY`。
+- 小文件阈值为 64 KiB；每批最多 512 个文件或 8 MiB，窗口上限为 4 个待确认批次。
+- 大文件以 1 MiB `FILE_DATA_V5` 分块传输，结束包和小文件记录均使用 CRC32。
+- 接收端始终写入 `<目标>.dtpart`，成功后用 `MoveFileExW` 替换正式文件。当前 v5 会传输全部源文件；接收端仅在镜像模式下于会话成功提交后删除目标端多余文件。
+- 文件 ID 是重连期间已提交状态的主键。只跳过已提交文件；不要宣称支持未提交文件的字节级续传。
+- 握手 socket 超时为 30 秒；传输 I/O 等待为 5 秒，90 秒无进度判为断连。发送端重连退避为 1、2、4、8、15 秒。
 
-```text
-src/
-|-- main.cpp                  WinMain, COM init, MainWindow, DHCP restore on exit
-|-- Version.h                 version constants (1.1.0, protocol v5)
-|-- AppConfig.h/.cpp          defaults and CLI overrides
-|-- Utils.h/.cpp              UTF-8 helpers, timestamps, paths, SHA-256 (BCrypt)
-|-- AuditLogger.h/.cpp        UTF-8 write-only log file
-|-- MainWindow.h/.cpp         Win32 frame (820×720), page switching, dark theme,
-|                              owner-draw UI, ConsoleDashboard + ConsoleLogView
-|-- IPage.h                   page interface with Relayout(dpi)
-|-- RoleSelectPage.h/.cpp     role picker
-|-- SenderPage.h/.cpp         sender 3-step setup UI
-|-- ReceiverPage.h/.cpp       receiver 3-step setup UI
-|-- DirPicker.h/.cpp          IFileDialog folder picker
-|-- ConsoleTheme.h            colour palette and font helpers (dark terminal)
-|-- ConsoleDashboard.h/.cpp   owner-draw status panel with progress bar,
-|                              speed, ETA, file count
-|-- ConsoleLogView.h/.cpp     owner-draw scrollable log view (256 lines)
-|-- NetworkDiscovery.h/.cpp   UDP broadcast discover/listen (protocol v5)
-|-- PairingHandler.h/.cpp     session token generation/verify (replaces pairing code)
-|-- TransferProtocol.h/.cpp   binary packet format helpers
-|-- TransferSession.h/.cpp    v5 sender/receiver worker thread, reconnect,
-|                              batch windowing, CRC32 streaming
-|-- FileScanner.h/.cpp        recursive scan and excludes
-|-- Manifest.h/.cpp           JSON manifest (legacy, used by TransferPlanner)
-|-- TransferPlanner.h/.cpp    manifest vs target comparison, mirror delete
-|-- ResumeManager.h/.cpp      .dtpart offset detection (legacy, v5 uses file-ID tracking)
-|-- ExcludeRules.h/.cpp       default excludes (System Volume Information, etc.)
-|-- ProgressTracker.h/.cpp    speed and ETA calculation
-|-- ReportGenerator.h/.cpp    UTF-8 transfer report
-|-- IpConfigurator.h/.cpp     optional admin static IP/DHCP helper
-|-- Resource.h                control IDs and custom WM_* messages
-`-- resources.rc              VERSIONINFO + manifest reference
-```
+## 实现规则
 
-## Important implementation rules
+- 任何同时包含 Winsock 和 Win32 的文件，必须先包含 `winsock2.h`，再包含 `windows.h`。
+- 所有 UTF-8 与 UTF-16 转换使用 `utils::ToUtf8()` / `utils::FromUtf8()`；日志和报告以 UTF-8 写入。
+- 本地路径 I/O 使用 `utils::NormalizePath()`；绝对本地路径必须支持 `\\?\`，UNC 路径必须支持 `\\?\UNC\`。
+- TCP 不是消息边界：保留 `SendAll()`、`RecvExact()` 的完整循环语义，不能以一次 `send()` 或 `recv()` 代替。
+- 停止会话时，`TransferSession::Stop()` 必须在 socket 锁内关闭活动 socket，释放锁后再 `join()` 工作线程，避免死锁。
+- 接收远端目录条目时必须维持 `IsSafeRelativePath()` 的校验，禁止绝对路径、盘符路径、空段和 `.` / `..` 段。
+- 扫描出的源文件在读前和读后均要用大小及最后修改时间验证；不要在未重新评估完整性模型的情况下移除该检查。
+- 小文件写入线程数由目标卷的 seek-penalty 查询决定：HDD 为 1，SSD 为 4，未知或网络路径为 2。不要在 UI 线程执行磁盘写入。
+- 保持 DPI 适配：页面在 `Relayout()` 中通过 `MulDiv` 计算尺寸，`MainWindow` 在 `WM_DPICHANGED` 时刷新字体和布局。
+- 中文 UI 文本使用宽字符串，延续周围代码的 Unicode 转义风格。新增控件必须同时处理初始布局和 `Relayout()`。
 
-- Include `winsock2.h` before `windows.h` in any file that needs both.
-- Use `utils::ToUtf8()` and `utils::FromUtf8()` for all UTF-8/UTF-16 conversion.
-- `TransferSession::SendAll()` and `RecvExact()` must loop until full I/O is complete. TCP `send()`/`recv()` may partially transfer.
-- `TransferSession::Stop()` must close sockets under lock, release the lock, then `join()` the worker thread.
-- File ID (`uint64_t`) is the primary key for tracking committed files across reconnects. Sender tracks `committed` set; receiver tracks `committed` vector.
-- Source file stability is verified before and after reading via `SourceFileMatches()` (size + last-write-time comparison).
-- Small file batches: each batch contains up to 512 files or 8 MB. Up to 4 batches may be in-flight. Sender waits for BATCH_ACK before sending next window.
-- Large files: streamed with CRC32 final check in FILE_END_V5; receiver responds with FILE_ACK_V5 (1 = ok, 0 = fail).
-- On connection loss, sender retries with exponential backoff (1s → 15s max). Already committed files are skipped via the `committed` set.
-- Receiver uses `SmallFileWriterPool` for concurrent .dtpart writes. Thread count determined by `DeviceIoControl` seek-penalty query (1 for HDD, 4 for SSD, 2 for unknown/network).
-- Logs and reports are UTF-8 narrow streams.
-- Manual IP entry and direct receiving are first-class flows. Do not make admin IP configuration a required UI step.
-- `NormalizePath()` prepends `\\?\` for absolute local paths and `\\?\UNC\` for UNC paths.
-- Keep Chinese UI strings as wide literals/Unicode escapes consistent with surrounding code.
-- Current CMake uses `target_link_options(DirectTransfer PRIVATE -static)` with the RC resource included.
-- DPI scaling: all page controls implement `Relayout()` using `MulDiv`. `MainWindow` handles `WM_DPICHANGED`.
+## 变更边界
+
+- 不要引入 SMB、共享目录、注册表改写、启动时防火墙 COM 自动化或子网定向枚举。
+- 不要把管理员 IP 配置改为强制步骤；自动发现与手动 IP 都应保留。
+- 更新协议字段、包类型、超时、文件阈值或镜像删除时，必须同步审查发送端、接收端、UI 文案和 README。
+- 不要在文档或 UI 中把“安全复制”描述成已在 v5 会话中按哈希跳过，除非同时完成该计划逻辑的协议接入。
+- 修改构建文件时保留 `resources.rc` 和 VERSIONINFO；当前资源文件是可执行文件元数据的一部分。

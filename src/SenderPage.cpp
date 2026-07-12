@@ -107,6 +107,7 @@ void SenderPage::CreateControls(const RECT& rc) {
     int xLabel = x + dotW + dotGap;
     int labelW = 66;
     int rowH = 22;
+    int statusH = 34;
     int rowGap = 6;
     int gap2 = 4;
     int y = 8;
@@ -162,11 +163,11 @@ void SenderPage::CreateControls(const RECT& rc) {
     // Informational status
     MakeLabel(L"\u72b6\u6001:", xLabel, y, 32);
     CreateWindowExW(0, L"STATIC", L"\u8bf7\u5148\u9009\u62e9\u6e90\u76ee\u5f55",
-        WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP | SS_ENDELLIPSIS | SS_NOPREFIX,
-        xLabel + 34, y + 2, ctrlW - (xLabel - x) - 34, rowH - 2,
+        WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX,
+        xLabel + 34, y + 1, ctrlW - (xLabel - x) - 34, statusH - 1,
         m_hParent, (HMENU)IDC_DISCOVERY_STATUS, m_hInst, NULL);
     if (hFont) SendMessageW(GetDlgItem(m_hParent, IDC_DISCOVERY_STATUS), WM_SETFONT, (WPARAM)hFont, TRUE);
-    y += rowH + rowGap;
+    y += statusH + rowGap;
 
     // ── Step 2: NIC configuration ──
     MakeDot(1);
@@ -234,6 +235,7 @@ void SenderPage::Relayout(const RECT& rc, UINT dpi) {
     const int dotW = dip(14);
     const int labelW = dip(78);
     const int rowH = dip(24);
+    const int statusH = dip(34);
     const int gap = dip(4);
     const int xLabel = margin + dotW + dip(6);
     const int contentRight = width - margin;
@@ -250,10 +252,10 @@ void SenderPage::Relayout(const RECT& rc, UINT dpi) {
     move(IDC_BTN_BROWSE, contentRight - browseW, y, browseW, rowH);
     y += rowH + gap;
 
-    move(601, xLabel, y, dip(52), rowH);
+    move(601, xLabel, y, dip(52), statusH);
     move(IDC_DISCOVERY_STATUS, xLabel + dip(56), y,
-        contentRight - xLabel - dip(56), rowH);
-    y += rowH + gap;
+        contentRight - xLabel - dip(56), statusH);
+    y += statusH + gap;
 
     move(IDC_STEP_DOT_2, margin, y + dip(4), dotW, dip(14));
     move(602, xLabel, y, labelW, rowH);

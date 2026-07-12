@@ -74,24 +74,29 @@ void ConsoleLogView::Paint(HDC hdc) {
     FillRect(hdc, &client, m_hBackgroundBrush);
     const int clientWidth = static_cast<int>(client.right);
     const int clientHeight = static_cast<int>(client.bottom);
-    RECT panel = {12, 4, (std::max)(13, clientWidth - 12),
-        (std::max)(5, clientHeight - 4)};
+    const int sideMargin = MulDiv(8, static_cast<int>(m_dpi), 96);
+    const int topMargin = MulDiv(4, static_cast<int>(m_dpi), 96);
+    const int inset = MulDiv(8, static_cast<int>(m_dpi), 96);
+    RECT panel = {sideMargin, topMargin,
+        (std::max)(sideMargin + 1, clientWidth - sideMargin),
+        (std::max)(topMargin + 1, clientHeight - topMargin)};
     FillRect(hdc, &panel, m_hPanelBrush);
     FrameRect(hdc, &panel, m_hBorderBrush);
     HFONT oldFont = (HFONT)SelectObject(hdc, m_hFont);
     const COLORREF oldColor = SetTextColor(hdc, console_theme::TEXT_DIM);
     const int oldBk = SetBkMode(hdc, TRANSPARENT);
-    RECT header = {panel.left + 10, panel.top + 5, panel.right - 10, panel.top + 20};
+    RECT header = {panel.left + inset, panel.top + topMargin,
+        panel.right - inset, panel.top + MulDiv(19, static_cast<int>(m_dpi), 96)};
     DrawTextW(hdc, L"[ LOG ]", -1, &header, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
     SetTextColor(hdc, console_theme::TEXT);
     TEXTMETRICW metrics = {};
     GetTextMetricsW(hdc, &metrics);
     const int lineHeight = (std::max)(14, static_cast<int>(metrics.tmHeight) + 2);
-    int y = panel.top + 23;
-    const int visibleLines = (std::max)(0, static_cast<int>(panel.bottom - y - 4) / lineHeight);
+    int y = panel.top + MulDiv(22, static_cast<int>(m_dpi), 96);
+    const int visibleLines = (std::max)(0, static_cast<int>(panel.bottom - y - topMargin) / lineHeight);
     const int first = (std::max)(0, static_cast<int>(m_lines.size()) - visibleLines);
     for (int i = first; i < static_cast<int>(m_lines.size()); ++i) {
-        RECT line = {panel.left + 10, y, panel.right - 10, y + lineHeight};
+        RECT line = {panel.left + inset, y, panel.right - inset, y + lineHeight};
         DrawTextW(hdc, m_lines[static_cast<size_t>(i)].c_str(), -1, &line,
             DT_LEFT | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
         y += lineHeight;

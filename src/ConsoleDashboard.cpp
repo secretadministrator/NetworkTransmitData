@@ -5,7 +5,9 @@
 
 namespace {
 constexpr wchar_t DASHBOARD_CLASS[] = L"DirectTransferConsoleDashboard";
-constexpr int PANEL_MARGIN = 12;
+int Scale(UINT dpi, int value) {
+    return MulDiv(value, static_cast<int>(dpi ? dpi : 96), 96);
+}
 
 void RegisterDashboardClass(HINSTANCE hInst) {
     WNDCLASSW wc = {};
@@ -78,7 +80,7 @@ void ConsoleDashboard::Clear() {
 void ConsoleDashboard::UpdateFonts() {
     HFONT mono = console_theme::CreateFontForDpi(9, m_dpi, L"Consolas");
     HFONT monoBold = console_theme::CreateFontForDpi(10, m_dpi, L"Consolas", FW_BOLD);
-    HFONT label = console_theme::CreateFontForDpi(9, m_dpi, L"Microsoft YaHei UI");
+    HFONT label = console_theme::CreateFontForDpi(9, m_dpi, L"Consolas");
     if (!mono || !monoBold || !label) {
         if (mono) DeleteObject(mono);
         if (monoBold) DeleteObject(monoBold);
@@ -122,12 +124,14 @@ void ConsoleDashboard::DrawMetric(HDC hdc, RECT rect, const wchar_t* label,
     const std::wstring& value, COLORREF valueColor) const {
     FillRect(hdc, &rect, m_hPanelAltBrush);
     FrameRect(hdc, &rect, m_hBorderBrush);
-    RECT labelRect = {rect.left + 10, rect.top + 6, rect.right - 10, rect.top + 22};
-    RECT valueRect = {rect.left + 10, rect.top + 23, rect.right - 10, rect.bottom - 5};
+    const int inset = Scale(m_dpi, 6);
+    const int split = rect.left + (rect.right - rect.left) * 45 / 100;
+    RECT labelRect = {rect.left + inset, rect.top + 1, split, rect.bottom - 1};
+    RECT valueRect = {split, rect.top + 1, rect.right - inset, rect.bottom - 1};
     DrawTextLine(hdc, label, labelRect, m_hLabel, console_theme::TEXT_DIM,
-        DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     DrawTextLine(hdc, value, valueRect, m_hMonoBold, valueColor,
-        DT_LEFT | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+        DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 }
 
 void ConsoleDashboard::Paint(HDC hdc) {
@@ -139,9 +143,11 @@ void ConsoleDashboard::Paint(HDC hdc) {
 
     const int clientWidth = static_cast<int>(client.right);
     const int clientHeight = static_cast<int>(client.bottom);
-    RECT panel = {PANEL_MARGIN, PANEL_MARGIN,
-        (std::max)(PANEL_MARGIN + 1, clientWidth - PANEL_MARGIN),
-        (std::max)(PANEL_MARGIN + 1, clientHeight - PANEL_MARGIN)};
+    const int panelMargin = Scale(m_dpi, 8);
+    const int inset = Scale(m_dpi, 8);
+    RECT panel = {panelMargin, panelMargin,
+        (std::max)(panelMargin + 1, clientWidth - panelMargin),
+        (std::max)(panelMargin + 1, clientHeight - panelMargin)};
     FillRect(hdc, &panel, m_hPanelBrush);
     FrameRect(hdc, &panel, m_hBorderBrush);
 
@@ -152,12 +158,15 @@ void ConsoleDashboard::Paint(HDC hdc) {
         : L"[ STATUS ]  \u7b49\u5f85\u4f20\u8f93\u4f1a\u8bdd";
     if (m_hasStats && !stats.stageText.empty() && stats.stage != TransferStage::Transferring)
         status += L"  |  " + stats.stageText;
-    const int statusRight = (std::max)(panel.left + 220, panel.right - 190);
-    RECT statusRect = {panel.left + 12, panel.top + 8, statusRight, panel.top + 28};
+    const int statusRight = (std::max)(panel.left + Scale(m_dpi, 220),
+        panel.right - Scale(m_dpi, 170));
+    RECT statusRect = {panel.left + inset, panel.top + Scale(m_dpi, 3),
+        statusRight, panel.top + Scale(m_dpi, 21)};
     DrawTextLine(hdc, status, statusRect, m_hMonoBold, statusColor,
         DT_LEFT | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
 
-    RECT bar = {panel.left + 12, panel.top + 34, panel.right - 12, panel.top + 47};
+    RECT bar = {panel.left + inset, panel.top + Scale(m_dpi, 25),
+        panel.right - inset, panel.top + Scale(m_dpi, 35)};
     FillRect(hdc, &bar, m_hPanelAltBrush);
     FrameRect(hdc, &bar, m_hBorderBrush);
     long double percent = 0.0L;
@@ -177,11 +186,12 @@ void ConsoleDashboard::Paint(HDC hdc) {
     if (fill.right > fill.left)
         FillRect(hdc, &fill, m_hAccentBrush);
 
-    const int gap = 8;
-    const int metricTop = panel.top + 56;
-    const int metricBottom = (std::min)(metricTop + 58, static_cast<int>(panel.bottom - 42));
-    const int metricWidth = (panel.right - panel.left - 24 - gap * 2) / 3;
-    const int metricLeft = panel.left + 12;
+    const int gap = Scale(m_dpi, 6);
+    const int metricTop = panel.top + Scale(m_dpi, 42);
+    const int metricBottom = (std::min)(metricTop + Scale(m_dpi, 28),
+        static_cast<int>(panel.bottom - Scale(m_dpi, 32)));
+    const int metricWidth = (panel.right - panel.left - inset * 2 - gap * 2) / 3;
+    const int metricLeft = panel.left + inset;
     std::wstring speed = m_hasStats && stats.recentSpeedBytesPerSec > 0
         ? utils::FormatSpeed(stats.recentSpeedBytesPerSec) : L"--";
     std::wstring elapsed = m_hasStats ? utils::FormatDuration(stats.elapsedSeconds) : L"--";
@@ -194,10 +204,11 @@ void ConsoleDashboard::Paint(HDC hdc) {
         metricLeft + metricWidth * 2 + gap, metricBottom},
         L"[ ELAPSED ]", elapsed, console_theme::ACCENT);
     DrawMetric(hdc, {metricLeft + metricWidth * 2 + gap * 2, metricTop,
-        panel.right - 12, metricBottom},
+        panel.right - inset, metricBottom},
         L"[ TOTAL TIME ]", total, console_theme::WARNING);
 
-    RECT details = {panel.left + 12, metricBottom + 6, panel.right - 12, panel.bottom - 7};
+    RECT details = {panel.left + inset, metricBottom + Scale(m_dpi, 3),
+        panel.right - inset, panel.bottom - Scale(m_dpi, 3)};
     std::wstring line = m_hasStats
         ? L"\u6587\u4ef6 " + std::to_wstring(stats.completedFiles) + L" / " +
           std::to_wstring(stats.totalFiles) + L"    \u6570\u636e " +
@@ -206,7 +217,7 @@ void ConsoleDashboard::Paint(HDC hdc) {
         : L"\u6587\u4ef6 --    \u6570\u636e --";
     DrawTextLine(hdc, line, details, m_hMono, console_theme::TEXT,
         DT_LEFT | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-    details.top += 17;
+    details.top += Scale(m_dpi, 16);
     std::wstring current = m_hasStats && !stats.currentFile.empty()
         ? L"\u5f53\u524d: " + stats.currentFile
         : L"\u5f53\u524d: --";

@@ -4,16 +4,16 @@
 
 namespace console_theme {
 
-inline constexpr COLORREF BACKGROUND = RGB(7, 12, 16);
-inline constexpr COLORREF PANEL = RGB(12, 20, 25);
-inline constexpr COLORREF PANEL_ALT = RGB(16, 27, 32);
-inline constexpr COLORREF BORDER = RGB(34, 67, 72);
-inline constexpr COLORREF TEXT = RGB(210, 236, 229);
-inline constexpr COLORREF TEXT_DIM = RGB(116, 151, 149);
-inline constexpr COLORREF ACCENT = RGB(61, 255, 157);
-inline constexpr COLORREF ACCENT_CYAN = RGB(0, 219, 255);
-inline constexpr COLORREF WARNING = RGB(255, 194, 77);
-inline constexpr COLORREF ERROR_COLOR = RGB(255, 92, 104);
+inline constexpr COLORREF BACKGROUND = RGB(255, 255, 255);
+inline constexpr COLORREF PANEL = RGB(255, 255, 255);
+inline constexpr COLORREF PANEL_ALT = RGB(248, 248, 248);
+inline constexpr COLORREF BORDER = RGB(160, 160, 160);
+inline constexpr COLORREF TEXT = RGB(0, 0, 0);
+inline constexpr COLORREF TEXT_DIM = RGB(80, 80, 80);
+inline constexpr COLORREF ACCENT = RGB(0, 0, 0);
+inline constexpr COLORREF ACCENT_CYAN = RGB(32, 32, 32);
+inline constexpr COLORREF WARNING = RGB(0, 0, 0);
+inline constexpr COLORREF ERROR_COLOR = RGB(0, 0, 0);
 
 inline HFONT CreateFontForDpi(int pointSize, UINT dpi, const wchar_t* face,
     int weight = FW_NORMAL) {
