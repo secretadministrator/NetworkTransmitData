@@ -21,10 +21,10 @@ void RegisterDashboardClass(HINSTANCE hInst) {
 
 COLORREF StageColor(TransferStage stage) {
     if (stage == TransferStage::Reconnecting)
-        return console_theme::WARNING;
+        return console_theme::HIGHLIGHT_AMBER;
     if (stage == TransferStage::Committing)
-        return console_theme::ACCENT_CYAN;
-    return console_theme::ACCENT;
+        return console_theme::HIGHLIGHT_GREEN;
+    return console_theme::HIGHLIGHT_BLUE;
 }
 } // namespace
 
@@ -51,7 +51,7 @@ bool ConsoleDashboard::Create(HINSTANCE hInst, HWND hParent, int controlId) {
     m_hPanelBrush = CreateSolidBrush(console_theme::PANEL);
     m_hPanelAltBrush = CreateSolidBrush(console_theme::PANEL_ALT);
     m_hBorderBrush = CreateSolidBrush(console_theme::BORDER);
-    m_hAccentBrush = CreateSolidBrush(console_theme::ACCENT);
+    m_hAccentBrush = CreateSolidBrush(console_theme::HIGHLIGHT_BLUE);
     UpdateFonts();
     return true;
 }
@@ -199,13 +199,13 @@ void ConsoleDashboard::Paint(HDC hdc) {
     if (m_hasStats && stats.estimatedTotalSeconds < 0)
         total = L"\u8ba1\u7b97\u4e2d...";
     DrawMetric(hdc, {metricLeft, metricTop, metricLeft + metricWidth, metricBottom},
-        L"[ SPEED ]", speed, console_theme::ACCENT_CYAN);
+        L"[ SPEED ]", speed, console_theme::HIGHLIGHT_GREEN);
     DrawMetric(hdc, {metricLeft + metricWidth + gap, metricTop,
         metricLeft + metricWidth * 2 + gap, metricBottom},
         L"[ ELAPSED ]", elapsed, console_theme::ACCENT);
     DrawMetric(hdc, {metricLeft + metricWidth * 2 + gap * 2, metricTop,
         panel.right - inset, metricBottom},
-        L"[ TOTAL TIME ]", total, console_theme::WARNING);
+        L"[ TOTAL TIME ]", total, console_theme::HIGHLIGHT_AMBER);
 
     RECT details = {panel.left + inset, metricBottom + Scale(m_dpi, 3),
         panel.right - inset, panel.bottom - Scale(m_dpi, 3)};

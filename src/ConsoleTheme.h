@@ -14,6 +14,9 @@ inline constexpr COLORREF ACCENT = RGB(0, 0, 0);
 inline constexpr COLORREF ACCENT_CYAN = RGB(32, 32, 32);
 inline constexpr COLORREF WARNING = RGB(0, 0, 0);
 inline constexpr COLORREF ERROR_COLOR = RGB(0, 0, 0);
+inline constexpr COLORREF HIGHLIGHT_BLUE = RGB(0, 92, 184);
+inline constexpr COLORREF HIGHLIGHT_GREEN = RGB(0, 122, 82);
+inline constexpr COLORREF HIGHLIGHT_AMBER = RGB(176, 88, 0);
 
 inline HFONT CreateFontForDpi(int pointSize, UINT dpi, const wchar_t* face,
     int weight = FW_NORMAL) {
