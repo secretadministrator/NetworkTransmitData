@@ -188,11 +188,14 @@ size_t ChooseSmallFileWriterCount(const std::wstring& targetDir) {
 
 class SmallFileWriterPool {
 public:
+    using CompletionCallback = std::function<void(std::vector<uint8_t>)>;
+
     struct Request {
         std::wstring fullPath;
         std::shared_ptr<std::vector<uint8_t>> payload;
         size_t offset = 0;
         size_t size = 0;
+        uint32_t expectedCrc = 0;
     };
 
     explicit SmallFileWriterPool(size_t threadCount) {
@@ -211,29 +214,29 @@ public:
             if (thread.joinable()) thread.join();
     }
 
-    std::vector<uint8_t> WriteBatch(const std::vector<Request>& requests) {
-        if (requests.empty())
-            return {};
+    void SubmitBatch(const std::vector<Request>& requests, CompletionCallback completion) {
+        if (requests.empty()) {
+            completion({});
+            return;
+        }
         auto state = std::make_shared<BatchState>();
         state->remaining = requests.size();
         state->results.assign(requests.size(), 0);
+        state->completion = std::move(completion);
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             for (size_t i = 0; i < requests.size(); ++i)
                 m_tasks.push_back({requests[i], state, i});
         }
         m_cv.notify_all();
-        std::unique_lock<std::mutex> lock(state->mutex);
-        state->cv.wait(lock, [&]() { return state->remaining == 0; });
-        return state->results;
     }
 
 private:
     struct BatchState {
         std::mutex mutex;
-        std::condition_variable cv;
         size_t remaining = 0;
         std::vector<uint8_t> results;
+        CompletionCallback completion;
     };
 
     struct Task {
@@ -243,6 +246,10 @@ private:
     };
 
     static bool WriteOne(const Request& request) {
+        if (Crc32::Compute(request.payload->data() + request.offset, request.size) !=
+                request.expectedCrc) {
+            return false;
+        }
         const size_t separator = request.fullPath.find_last_of(L'\\');
         if (separator == std::wstring::npos ||
             !utils::CreateDirectoryTree(request.fullPath.substr(0, separator))) {
@@ -277,12 +284,19 @@ private:
                 m_tasks.pop_front();
             }
             const bool ok = WriteOne(task.request);
+            CompletionCallback completion;
+            std::vector<uint8_t> results;
             {
                 std::lock_guard<std::mutex> lock(task.state->mutex);
                 task.state->results[task.resultIndex] = ok ? 1 : 0;
                 --task.state->remaining;
+                if (task.state->remaining == 0 && task.state->completion) {
+                    completion = std::move(task.state->completion);
+                    results = task.state->results;
+                }
             }
-            task.state->cv.notify_all();
+            if (completion)
+                completion(std::move(results));
         }
     }
 
@@ -1034,112 +1048,111 @@ TransferResult TransferSession::RunSenderConnection(const std::wstring& sourceDi
     }
 
     size_t smallCursor = 0;
-    while (smallCursor < smallFiles.size()) {
-        std::vector<BatchDescriptor> window;
-        while (smallCursor < smallFiles.size() && window.size() < SMALL_BATCH_WINDOW) {
-            BatchDescriptor descriptor;
-            descriptor.id = context.nextBatchId++;
-            std::vector<uint8_t> batch;
-            AppendU64(batch, descriptor.id);
-            const size_t countOffset = batch.size();
-            AppendU32(batch, 0);
-            uint32_t count = 0;
-            while (smallCursor < smallFiles.size() && count < SMALL_BATCH_MAX_FILES) {
-                const uint64_t fileId = smallFiles[smallCursor];
-                const FileEntry& entry = context.files[static_cast<size_t>(fileId)];
-                const size_t recordBytes = 8 + 8 + 4 + static_cast<size_t>(entry.size);
-                if (count > 0 && batch.size() + recordBytes > SMALL_BATCH_MAX_BYTES)
-                    break;
-                const std::wstring fullPath = sourceDir + L"\\" + entry.relativePath;
-                if (!SourceFileMatches(fullPath, entry))
+    std::unordered_map<uint64_t, BatchDescriptor> pendingBatches;
+    pendingBatches.reserve(SMALL_BATCH_WINDOW);
+    auto sendNextSmallBatch = [&]() -> TransferResult {
+        BatchDescriptor descriptor;
+        descriptor.id = context.nextBatchId++;
+        std::vector<uint8_t> batch;
+        AppendU64(batch, descriptor.id);
+        const size_t countOffset = batch.size();
+        AppendU32(batch, 0);
+        uint32_t count = 0;
+        while (smallCursor < smallFiles.size() && count < SMALL_BATCH_MAX_FILES) {
+            const uint64_t fileId = smallFiles[smallCursor];
+            const FileEntry& entry = context.files[static_cast<size_t>(fileId)];
+            const size_t recordBytes = 8 + 8 + 4 + static_cast<size_t>(entry.size);
+            if (count > 0 && batch.size() + recordBytes > SMALL_BATCH_MAX_BYTES)
+                break;
+            const std::wstring fullPath = sourceDir + L"\\" + entry.relativePath;
+            if (!SourceFileMatches(fullPath, entry))
+                return MakeResult(TransferResultCode::FileError,
+                    L"源文件在盘点后发生变化：" + entry.relativePath);
+            ScopedHandle file(CreateFileW(utils::NormalizePath(fullPath).c_str(),
+                GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
+            if (file.Get() == INVALID_HANDLE_VALUE)
+                return MakeResult(TransferResultCode::FileError,
+                    L"无法读取源文件：" + entry.relativePath);
+            std::vector<uint8_t> data(static_cast<size_t>(entry.size));
+            size_t readTotal = 0;
+            while (readTotal < data.size()) {
+                DWORD readNow = 0;
+                const DWORD request = static_cast<DWORD>(data.size() - readTotal);
+                if (!ReadFile(file.Get(), data.data() + readTotal, request, &readNow, nullptr) ||
+                    readNow == 0) {
                     return MakeResult(TransferResultCode::FileError,
-                        L"源文件在盘点后发生变化：" + entry.relativePath);
-                ScopedHandle file(CreateFileW(utils::NormalizePath(fullPath).c_str(),
-                    GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-                    FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
-                if (file.Get() == INVALID_HANDLE_VALUE)
-                    return MakeResult(TransferResultCode::FileError,
-                        L"无法读取源文件：" + entry.relativePath);
-                std::vector<uint8_t> data(static_cast<size_t>(entry.size));
-                size_t readTotal = 0;
-                while (readTotal < data.size()) {
-                    DWORD readNow = 0;
-                    const DWORD request = static_cast<DWORD>(data.size() - readTotal);
-                    if (!ReadFile(file.Get(), data.data() + readTotal, request, &readNow, nullptr) ||
-                        readNow == 0) {
-                        return MakeResult(TransferResultCode::FileError,
-                            L"读取源文件失败：" + entry.relativePath);
-                    }
-                    readTotal += readNow;
+                        L"读取源文件失败：" + entry.relativePath);
                 }
-                uint8_t extra = 0;
-                DWORD extraRead = 0;
-                if (!ReadFile(file.Get(), &extra, 1, &extraRead, nullptr) || extraRead != 0 ||
-                    !SourceFileMatches(fullPath, entry)) {
-                    return MakeResult(TransferResultCode::FileError,
-                        L"源文件在读取期间发生变化：" + entry.relativePath);
-                }
-                AppendU64(batch, fileId);
-                AppendU64(batch, static_cast<uint64_t>(entry.size));
-                AppendU32(batch, Crc32::Compute(data.data(), data.size()));
-                AppendBytes(batch, data.data(), data.size());
-                descriptor.files.push_back(fileId);
-                descriptor.bytes += entry.size;
-                ++smallCursor;
-                ++count;
+                readTotal += readNow;
             }
-            WriteU32(batch, countOffset, count);
-            io = SendPacket(socket, static_cast<uint8_t>(PacketType::BATCH_DATA), batch);
-            if (!io.IsOk())
-                return IoFailure(io, L"发送小文件批次");
-            window.push_back(std::move(descriptor));
+            uint8_t extra = 0;
+            DWORD extraRead = 0;
+            if (!ReadFile(file.Get(), &extra, 1, &extraRead, nullptr) || extraRead != 0 ||
+                !SourceFileMatches(fullPath, entry)) {
+                return MakeResult(TransferResultCode::FileError,
+                    L"源文件在读取期间发生变化：" + entry.relativePath);
+            }
+            AppendU64(batch, fileId);
+            AppendU64(batch, static_cast<uint64_t>(entry.size));
+            AppendU32(batch, Crc32::Compute(data.data(), data.size()));
+            AppendBytes(batch, data.data(), data.size());
+            descriptor.files.push_back(fileId);
+            descriptor.bytes += entry.size;
+            ++smallCursor;
+            ++count;
+        }
+        WriteU32(batch, countOffset, count);
+        io = SendPacket(socket, static_cast<uint8_t>(PacketType::BATCH_DATA), batch);
+        if (!io.IsOk())
+            return IoFailure(io, L"发送小文件批次");
+        pendingBatches.emplace(descriptor.id, std::move(descriptor));
+        return MakeResult(TransferResultCode::Success, L"");
+    };
+
+    while (smallCursor < smallFiles.size() || !pendingBatches.empty()) {
+        while (smallCursor < smallFiles.size() &&
+                pendingBatches.size() < SMALL_BATCH_WINDOW) {
+            TransferResult sent = sendNextSmallBatch();
+            if (sent.code != TransferResultCode::Success)
+                return sent;
         }
 
-        std::unordered_map<uint64_t, size_t> pendingBatches;
-        pendingBatches.reserve(window.size());
-        for (size_t i = 0; i < window.size(); ++i)
-            pendingBatches.emplace(window[i].id, i);
-
-        std::vector<uint8_t> acknowledged(window.size(), 0);
-        size_t acknowledgedCount = 0;
-        while (acknowledgedCount < window.size()) {
-            std::vector<uint8_t> ack;
-            io = receiveExpected(PacketType::BATCH_ACK, ack);
-            if (!io.IsOk())
-                return IoFailure(io, L"接收小文件批次确认");
-            size_t pos = 0;
-            uint64_t batchId = 0;
-            uint8_t status = 0;
-            if (!ReadU64(ack, pos, batchId) || !ReadU8(ack, pos, status) ||
-                pos != ack.size()) {
-                return MakeResult(TransferResultCode::ProtocolError, L"小文件批次确认不匹配");
-            }
-            const auto pending = pendingBatches.find(batchId);
-            if (pending == pendingBatches.end() || acknowledged[pending->second] != 0) {
-                return MakeResult(TransferResultCode::ConnectionLost,
-                    L"小文件批次确认不属于当前窗口，正在重连恢复");
-            }
-            if (status != 1)
-                return MakeResult(TransferResultCode::FileError, L"接收端提交小文件批次失败");
-            acknowledged[pending->second] = 1;
-            ++acknowledgedCount;
-            const BatchDescriptor& descriptor = window[pending->second];
-            int newlyCommitted = 0;
-            int64_t newlyCommittedBytes = 0;
-            for (uint64_t id : descriptor.files) {
-                if (context.committed.insert(id).second) {
-                    ++newlyCommitted;
-                    newlyCommittedBytes += context.files[static_cast<size_t>(id)].size;
-                }
-            }
-            context.progress.AddCommitted(newlyCommittedBytes, newlyCommitted);
-            m_stats.completedFiles = static_cast<int>(context.committed.size());
-            m_stats.stageProcessed = context.committed.size();
-            if (!descriptor.files.empty())
-                m_stats.currentFile = context.files[static_cast<size_t>(descriptor.files.back())].relativePath;
-            UpdateStats(context.progress, m_stats);
-            ReportProgress();
+        std::vector<uint8_t> ack;
+        io = receiveExpected(PacketType::BATCH_ACK, ack);
+        if (!io.IsOk())
+            return IoFailure(io, L"接收小文件批次确认");
+        size_t pos = 0;
+        uint64_t batchId = 0;
+        uint8_t status = 0;
+        if (!ReadU64(ack, pos, batchId) || !ReadU8(ack, pos, status) ||
+            pos != ack.size()) {
+            return MakeResult(TransferResultCode::ProtocolError, L"小文件批次确认不匹配");
         }
+        const auto pending = pendingBatches.find(batchId);
+        if (pending == pendingBatches.end()) {
+            return MakeResult(TransferResultCode::ConnectionLost,
+                L"小文件批次确认不属于当前窗口，正在重连恢复");
+        }
+        if (status != 1)
+            return MakeResult(TransferResultCode::FileError, L"接收端提交小文件批次失败");
+        BatchDescriptor descriptor = std::move(pending->second);
+        pendingBatches.erase(pending);
+        int newlyCommitted = 0;
+        int64_t newlyCommittedBytes = 0;
+        for (uint64_t id : descriptor.files) {
+            if (context.committed.insert(id).second) {
+                ++newlyCommitted;
+                newlyCommittedBytes += context.files[static_cast<size_t>(id)].size;
+            }
+        }
+        context.progress.AddCommitted(newlyCommittedBytes, newlyCommitted);
+        m_stats.completedFiles = static_cast<int>(context.committed.size());
+        m_stats.stageProcessed = context.committed.size();
+        if (!descriptor.files.empty())
+            m_stats.currentFile = context.files[static_cast<size_t>(descriptor.files.back())].relativePath;
+        UpdateStats(context.progress, m_stats);
+        ReportProgress();
     }
 
     for (uint64_t fileId = 0; fileId < context.files.size(); ++fileId) {
@@ -1166,48 +1179,113 @@ TransferResult TransferSession::RunSenderConnection(const std::wstring& sourceDi
         context.progress.SetInFlight(0);
         ReportProgress();
 
-        Crc32 crc;
-        std::vector<uint8_t> buffer(LARGE_FILE_CHUNK);
+        constexpr size_t LARGE_FILE_PIPELINE_DEPTH = 4;
+        std::mutex pipelineMutex;
+        std::condition_variable pipelineReady;
+        std::condition_variable pipelineSpace;
+        std::deque<std::vector<uint8_t>> readyChunks;
+        bool producerDone = false;
+        bool producerCancelled = false;
+        bool producerError = false;
+        uint32_t fileCrc = 0;
+
+        std::thread reader([&]() {
+            Crc32 crc;
+            int64_t unread = entry.size;
+            while (unread > 0) {
+                const DWORD request = unread > LARGE_FILE_CHUNK
+                    ? LARGE_FILE_CHUNK : static_cast<DWORD>(unread);
+                std::vector<uint8_t> data(8 + request);
+                for (int i = 0; i < 8; ++i)
+                    data[static_cast<size_t>(i)] = static_cast<uint8_t>(fileId >> (i * 8));
+                DWORD readNow = 0;
+                if (!ReadFile(file.Get(), data.data() + 8, request, &readNow, nullptr) ||
+                    readNow == 0) {
+                    std::lock_guard<std::mutex> lock(pipelineMutex);
+                    producerError = true;
+                    producerDone = true;
+                    pipelineReady.notify_all();
+                    return;
+                }
+                data.resize(8 + readNow);
+                crc.Update(data.data() + 8, readNow);
+                unread -= readNow;
+
+                std::unique_lock<std::mutex> lock(pipelineMutex);
+                pipelineSpace.wait(lock, [&]() {
+                    return producerCancelled || !m_running ||
+                        readyChunks.size() < LARGE_FILE_PIPELINE_DEPTH;
+                });
+                if (producerCancelled || !m_running) {
+                    producerDone = true;
+                    pipelineReady.notify_all();
+                    return;
+                }
+                readyChunks.push_back(std::move(data));
+                lock.unlock();
+                pipelineReady.notify_one();
+            }
+
+            uint8_t extra = 0;
+            DWORD extraRead = 0;
+            const bool intact = ReadFile(file.Get(), &extra, 1, &extraRead, nullptr) &&
+                extraRead == 0 && SourceFileMatches(fullPath, entry);
+            {
+                std::lock_guard<std::mutex> lock(pipelineMutex);
+                producerError = !intact;
+                fileCrc = crc.Finish();
+                producerDone = true;
+            }
+            pipelineReady.notify_all();
+        });
+
         int64_t remaining = entry.size;
         bool firstDataReport = true;
         while (remaining > 0) {
-            const DWORD request = remaining > LARGE_FILE_CHUNK
-                ? LARGE_FILE_CHUNK : static_cast<DWORD>(remaining);
-            DWORD readNow = 0;
-            if (!ReadFile(file.Get(), buffer.data(), request, &readNow, nullptr) || readNow == 0) {
-                SendString(socket, static_cast<uint8_t>(PacketType::ERROR_MSG), L"READ_FAILED");
-                std::vector<uint8_t> aborted;
-                AppendU64(aborted, fileId);
-                AppendU32(aborted, 0);
-                SendPacket(socket, static_cast<uint8_t>(PacketType::FILE_END_V5), aborted);
-                return MakeResult(TransferResultCode::FileError,
-                    L"读取源文件失败：" + entry.relativePath);
-            }
-            crc.Update(buffer.data(), readNow);
             std::vector<uint8_t> data;
-            data.reserve(8 + readNow);
-            AppendU64(data, fileId);
-            AppendBytes(data, buffer.data(), readNow);
+            {
+                std::unique_lock<std::mutex> lock(pipelineMutex);
+                pipelineReady.wait(lock, [&]() {
+                    return !readyChunks.empty() || producerDone || !m_running;
+                });
+                if (!readyChunks.empty()) {
+                    data = std::move(readyChunks.front());
+                    readyChunks.pop_front();
+                } else {
+                    break;
+                }
+            }
+            pipelineSpace.notify_one();
             io = SendPacket(socket, static_cast<uint8_t>(PacketType::FILE_DATA_V5), data);
-            if (!io.IsOk())
+            if (!io.IsOk()) {
+                {
+                    std::lock_guard<std::mutex> lock(pipelineMutex);
+                    producerCancelled = true;
+                }
+                pipelineSpace.notify_all();
+                reader.join();
                 return IoFailure(io, L"发送大文件数据");
-            remaining -= readNow;
+            }
+            remaining -= static_cast<int64_t>(data.size() - 8);
             m_stats.stageBytes = entry.size - remaining;
             context.progress.SetInFlight(m_stats.stageBytes);
             UpdateStats(context.progress, m_stats);
             ReportProgress(firstDataReport);
             firstDataReport = false;
         }
-        uint8_t extra = 0;
-        DWORD extraRead = 0;
-        if (!ReadFile(file.Get(), &extra, 1, &extraRead, nullptr) || extraRead != 0 ||
-            !SourceFileMatches(fullPath, entry)) {
+        reader.join();
+        if (producerError || remaining != 0) {
+            SendString(socket, static_cast<uint8_t>(PacketType::ERROR_MSG), L"READ_FAILED");
+            std::vector<uint8_t> aborted;
+            AppendU64(aborted, fileId);
+            AppendU32(aborted, 0);
+            SendPacket(socket, static_cast<uint8_t>(PacketType::FILE_END_V5), aborted);
             return MakeResult(TransferResultCode::FileError,
                 L"源文件在读取期间发生变化：" + entry.relativePath);
         }
         std::vector<uint8_t> endFile;
         AppendU64(endFile, fileId);
-        AppendU32(endFile, crc.Finish());
+        AppendU32(endFile, fileCrc);
         io = SendPacket(socket, static_cast<uint8_t>(PacketType::FILE_END_V5), endFile);
         if (!io.IsOk())
             return IoFailure(io, L"发送大文件完成信息");
@@ -1523,6 +1601,7 @@ ReceiverConnectionResult TransferSession::HandleReceiverConnection(SOCKET socket
         return true;
     };
     const size_t writerCount = ChooseSmallFileWriterCount(targetDir);
+    std::mutex smallBatchMutex;
     SmallFileWriterPool smallFileWriters(writerCount);
     Log(L"小文件接收写入线程：" + std::to_wstring(writerCount));
 
@@ -1561,64 +1640,76 @@ ReceiverConnectionResult TransferSession::HandleReceiverConnection(SOCKET socket
                     break;
                 }
                 const size_t fileOffset = batchPos;
-                const uint8_t* fileData = batchData.data() + batchPos;
                 batchPos += static_cast<size_t>(fileSize);
-                if (Crc32::Compute(fileData, static_cast<size_t>(fileSize)) != expectedCrc) {
-                    batchOk = false;
-                    break;
+                {
+                    std::lock_guard<std::mutex> lock(smallBatchMutex);
+                    if (state.committed[static_cast<size_t>(fileId)])
+                        continue;
                 }
-                if (state.committed[static_cast<size_t>(fileId)])
-                    continue;
                 const FileEntry& entry = state.catalog[static_cast<size_t>(fileId)];
                 SmallFileWriterPool::Request request;
                 request.fullPath = targetDir + L"\\" + entry.relativePath;
                 request.payload = batchPayload;
                 request.offset = fileOffset;
                 request.size = static_cast<size_t>(fileSize);
+                request.expectedCrc = expectedCrc;
                 requestIds.push_back(fileId);
                 requests.push_back(std::move(request));
             }
             if (batchPos != batchData.size())
                 batchOk = false;
-            if (batchOk) {
-                const std::vector<uint8_t> results = smallFileWriters.WriteBatch(requests);
-                if (results.size() != requests.size()) {
-                    batchOk = false;
-                } else {
+            if (!batchOk) {
+                std::vector<uint8_t> ack;
+                AppendU64(ack, batchId);
+                AppendU8(ack, 0);
+                SendPacket(socket, static_cast<uint8_t>(PacketType::BATCH_ACK), ack);
+                ++m_stats.failedFiles;
+                return ReceiverConnectionResult::Failed;
+            }
+
+            const size_t requestCount = requests.size();
+            smallFileWriters.SubmitBatch(requests,
+                [&, batchId, requestCount, requestIds = std::move(requestIds)](
+                    std::vector<uint8_t> results) mutable {
+                    bool completedOk = results.size() == requestCount;
                     int committedFiles = 0;
                     int64_t committedBytes = 0;
                     for (size_t i = 0; i < results.size(); ++i) {
                         if (results[i] != 1) {
-                            batchOk = false;
+                            completedOk = false;
                             continue;
                         }
                         const uint64_t fileId = requestIds[i];
-                        if (!state.committed[static_cast<size_t>(fileId)]) {
-                            state.committed[static_cast<size_t>(fileId)] = true;
-                            ++committedFiles;
-                            committedBytes += state.catalog[static_cast<size_t>(fileId)].size;
-                            m_stats.currentFile =
-                                state.catalog[static_cast<size_t>(fileId)].relativePath;
+                        {
+                            std::lock_guard<std::mutex> lock(smallBatchMutex);
+                            if (!state.committed[static_cast<size_t>(fileId)]) {
+                                state.committed[static_cast<size_t>(fileId)] = true;
+                                ++committedFiles;
+                                committedBytes += state.catalog[static_cast<size_t>(fileId)].size;
+                                m_stats.currentFile =
+                                    state.catalog[static_cast<size_t>(fileId)].relativePath;
+                            }
                         }
                     }
-                    if (committedFiles > 0)
-                        state.progress.AddCommitted(committedBytes, committedFiles);
-                    m_stats.completedFiles = static_cast<int>(state.CommittedCount());
-                    m_stats.stageProcessed = m_stats.completedFiles;
-                    UpdateStats(state.progress, m_stats);
-                    ReportProgress();
-                }
-            }
-            std::vector<uint8_t> ack;
-            AppendU64(ack, batchId);
-            AppendU8(ack, batchOk ? 1 : 0);
-            IoResult ackIo = SendPacket(socket, static_cast<uint8_t>(PacketType::BATCH_ACK), ack);
-            if (!ackIo.IsOk())
-                return ReceiverConnectionResult::ConnectionLost;
-            if (!batchOk) {
-                ++m_stats.failedFiles;
-                return ReceiverConnectionResult::Failed;
-            }
+                    {
+                        std::lock_guard<std::mutex> lock(smallBatchMutex);
+                        if (committedFiles > 0)
+                            state.progress.AddCommitted(committedBytes, committedFiles);
+                        m_stats.completedFiles = static_cast<int>(state.CommittedCount());
+                        m_stats.stageProcessed = m_stats.completedFiles;
+                        if (!completedOk)
+                            ++m_stats.failedFiles;
+                        UpdateStats(state.progress, m_stats);
+                        ReportProgress();
+                    }
+                    std::vector<uint8_t> ack;
+                    AppendU64(ack, batchId);
+                    AppendU8(ack, completedOk ? 1 : 0);
+                    IoResult ackIo = SendPacket(
+                        socket, static_cast<uint8_t>(PacketType::BATCH_ACK), ack);
+                    if (!ackIo.IsOk())
+                        CloseActiveSocket(socket);
+                });
             continue;
         }
 
@@ -1642,36 +1733,78 @@ ReceiverConnectionResult TransferSession::HandleReceiverConnection(SOCKET socket
                 : INVALID_HANDLE_VALUE);
             if (file.Get() == INVALID_HANDLE_VALUE)
                 fileOk = false;
-            Crc32 crc;
+            constexpr size_t LARGE_FILE_PIPELINE_DEPTH = 4;
+            std::mutex writeMutex;
+            std::condition_variable writeReady;
+            std::condition_variable writeSpace;
+            std::deque<std::vector<uint8_t>> pendingWrites;
+            bool receiveDone = false;
+            uint32_t actualCrc = 0;
+            std::thread writer([&]() {
+                Crc32 crc;
+                for (;;) {
+                    std::vector<uint8_t> chunk;
+                    {
+                        std::unique_lock<std::mutex> lock(writeMutex);
+                        writeReady.wait(lock, [&]() {
+                            return receiveDone || !pendingWrites.empty();
+                        });
+                        if (pendingWrites.empty()) {
+                            if (receiveDone)
+                                break;
+                            continue;
+                        }
+                        chunk = std::move(pendingWrites.front());
+                        pendingWrites.pop_front();
+                    }
+                    writeSpace.notify_one();
+                    const DWORD dataSize = static_cast<DWORD>(chunk.size() - 8);
+                    crc.Update(chunk.data() + 8, dataSize);
+                    DWORD written = 0;
+                    if (fileOk && (!WriteFile(file.Get(), chunk.data() + 8,
+                            dataSize, &written, nullptr) || written != dataSize)) {
+                        fileOk = false;
+                    }
+                }
+                actualCrc = crc.Finish();
+            });
             uint64_t remaining = fileSize;
             bool senderAborted = false;
+            bool receiveFailed = false;
+            bool protocolFailed = false;
             bool firstDataReport = true;
             while (remaining > 0) {
                 std::vector<uint8_t> chunk;
                 uint8_t chunkType = 0;
                 io = RecvPacket(socket, chunkType, chunk);
-                if (!io.IsOk())
-                    return ReceiverConnectionResult::ConnectionLost;
-                if (chunkType == static_cast<uint8_t>(PacketType::ERROR_MSG)) {
-                    senderAborted = true;
-                    fileOk = false;
+                if (!io.IsOk()) {
+                    receiveFailed = true;
                     break;
                 }
-                if (chunkType != static_cast<uint8_t>(PacketType::FILE_DATA_V5))
-                    return ReceiverConnectionResult::Failed;
+                if (chunkType == static_cast<uint8_t>(PacketType::ERROR_MSG)) {
+                    senderAborted = true;
+                    break;
+                }
+                if (chunkType != static_cast<uint8_t>(PacketType::FILE_DATA_V5)) {
+                    protocolFailed = true;
+                    break;
+                }
                 size_t chunkPos = 0;
                 uint64_t chunkId = 0;
                 if (!ReadU64(chunk, chunkPos, chunkId) || chunkId != fileId ||
                     chunkPos >= chunk.size() || chunk.size() - chunkPos > remaining) {
-                    return ReceiverConnectionResult::Failed;
+                    protocolFailed = true;
+                    break;
                 }
                 const DWORD dataSize = static_cast<DWORD>(chunk.size() - chunkPos);
-                crc.Update(chunk.data() + chunkPos, dataSize);
-                DWORD written = 0;
-                if (fileOk && (!WriteFile(file.Get(), chunk.data() + chunkPos,
-                        dataSize, &written, nullptr) || written != dataSize)) {
-                    fileOk = false;
+                {
+                    std::unique_lock<std::mutex> lock(writeMutex);
+                    writeSpace.wait(lock, [&]() {
+                        return pendingWrites.size() < LARGE_FILE_PIPELINE_DEPTH;
+                    });
+                    pendingWrites.push_back(std::move(chunk));
                 }
+                writeReady.notify_one();
                 remaining -= dataSize;
                 m_stats.currentFile = entry.relativePath;
                 m_stats.stageBytes = static_cast<int64_t>(fileSize - remaining);
@@ -1680,6 +1813,16 @@ ReceiverConnectionResult TransferSession::HandleReceiverConnection(SOCKET socket
                 ReportProgress(firstDataReport);
                 firstDataReport = false;
             }
+            {
+                std::lock_guard<std::mutex> lock(writeMutex);
+                receiveDone = true;
+            }
+            writeReady.notify_all();
+            writer.join();
+            if (receiveFailed)
+                return ReceiverConnectionResult::ConnectionLost;
+            if (protocolFailed)
+                return ReceiverConnectionResult::Failed;
             std::vector<uint8_t> end;
             uint8_t endType = 0;
             io = RecvPacket(socket, endType, end);
@@ -1693,7 +1836,7 @@ ReceiverConnectionResult TransferSession::HandleReceiverConnection(SOCKET socket
                 endPos != end.size() || endId != fileId) {
                 return ReceiverConnectionResult::Failed;
             }
-            if (remaining != 0 || senderAborted || crc.Finish() != expectedCrc)
+            if (remaining != 0 || senderAborted || actualCrc != expectedCrc)
                 fileOk = false;
             file.Close();
             if (fileOk && !state.committed[static_cast<size_t>(fileId)]) {
