@@ -184,16 +184,15 @@ void ConsoleDashboard::Paint(HDC hdc) {
     const int metricLeft = panel.left + 12;
     std::wstring speed = m_hasStats && stats.recentSpeedBytesPerSec > 0
         ? utils::FormatSpeed(stats.recentSpeedBytesPerSec) : L"--";
-    std::wstring eta = m_hasStats ? utils::FormatDuration(stats.estimatedRemainingSeconds) : L"--";
+    std::wstring elapsed = m_hasStats ? utils::FormatDuration(stats.elapsedSeconds) : L"--";
     std::wstring total = m_hasStats ? utils::FormatDuration(stats.estimatedTotalSeconds) : L"--";
-    if (m_hasStats && stats.stage == TransferStage::Transferring &&
-        stats.estimatedRemainingSeconds < 0)
-        eta = L"\u8ba1\u7b97\u4e2d...";
+    if (m_hasStats && stats.estimatedTotalSeconds < 0)
+        total = L"\u8ba1\u7b97\u4e2d...";
     DrawMetric(hdc, {metricLeft, metricTop, metricLeft + metricWidth, metricBottom},
         L"[ SPEED ]", speed, console_theme::ACCENT_CYAN);
     DrawMetric(hdc, {metricLeft + metricWidth + gap, metricTop,
         metricLeft + metricWidth * 2 + gap, metricBottom},
-        L"[ ETA ]", eta, console_theme::ACCENT);
+        L"[ ELAPSED ]", elapsed, console_theme::ACCENT);
     DrawMetric(hdc, {metricLeft + metricWidth * 2 + gap * 2, metricTop,
         panel.right - 12, metricBottom},
         L"[ TOTAL TIME ]", total, console_theme::WARNING);
